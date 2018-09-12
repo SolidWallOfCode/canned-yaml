@@ -4,20 +4,50 @@
 #include <string>
 #include <vector>
 
+bool (def_inboundrule(YAML::Node ip))
+{
+   if(!ip.IsMap())
+    {
+    std::cout<<"\n outbound rule requires an map";
+    return false;
+    }
+        std::cout<<"\n oumeeeeeeend rule requires an map";
+
+    return true;
+}
+
+bool (def_outboundrule(YAML::Node ip))
+{
+   if(!ip.IsMap())
+    {
+    std::cout<<"\n outbound rule requires an map";
+    return false;
+    }
+    return true;
+}
+
+bool def_rules(YAML::Node ip)
+{
+    std::cout<<"reached here";
+    if(def_inboundrule(ip))
+    {
+        return true;
+    }
+    else if(def_outboundrule(ip))
+    {
+        return true;
+    }
+    else
+    {
+      std::cout<<"Not a valid rule";
+      return false;
+    }
+}
+
 bool def_version(YAML::Node ip)
 {
     std::cout<<"reached here";
-    if(!ip.IsS())
-    {
-        std::cout<<"ip_addr_acl defined is not an array";
-        return false;
-    }
-    
-    if(!def_rules(ip))
-    {   
-         std::cout<<"ip_addr_acl doesn't staisfy rule";
-         return false;
-    }
+///////// verify if it is a string
     return true;
 }
 
@@ -30,14 +60,23 @@ bool def_ip_addr_acl(YAML::Node ip)
         return false;
     }
     
-    if(!def_rules(ip))
-    {   
-         std::cout<<"ip_addr_acl doesn't staisfy rule";
-         return false;
+    {
+       std::cout<<"\nsize " << ip.size() <<" ";
+       /*auto n:none n.first,n.second*/
+    }
+    for(auto dir : ip)
+    {        
+      std::cout<<"ip_addr_acl tesererrrrrrrrrrrr";
+
+	if(!def_rules(dir))
+	{   
+	    std::cout<<"ip_addr_acl doesn't staisfy rule";
+	    return false;
+	}
     }
     return true;
 }
-
+/*
 bool def_inbound(YAML::Node ip)
 {
   
@@ -57,7 +96,7 @@ bool def_inbound(YAML::Node ip)
     if(ip.IsDefined())
               {
               std::cout<<"\n ip_addr_acl def";
-              }*/
+              }
     return true;
 }
 bool def_outbound(YAML::Node ip)
@@ -79,7 +118,7 @@ bool def_outbound(YAML::Node ip)
     if(ip.IsDefined())
               {
               std::cout<<"\n ip_addr_acl def";
-              }*/
+              }
     return true;
 }
 bool def_action(YAML::Node ip)
@@ -95,7 +134,7 @@ bool def_methods(YAML::Node ip)
     std::cout<<"\n reached methods";
  
     return true;
-}
+}*/
 int main()
 {
     YAML::Node config = YAML::LoadFile("./config.json");
@@ -109,7 +148,7 @@ int main()
        std::cout<<"ip_addr_acl is missing";
        return 0;
     }
- 
+/*
     for (auto dir : config["ip_addr_acl"])
     {
         if(dir["inbound"]) {
@@ -122,9 +161,9 @@ int main()
 	    def_action(dir["action"]);}
          if(dir["methods"]){
 	  def_methods(dir["methods"]);} 
-    }
+    }*/
             
-           // std::cout<<config["ip_addr_acl"];
+            //std::cout<<config;//["ip_addr_acl"];
 
     //    YAML::Node config = YAML::LoadFile("./config.yaml");
 

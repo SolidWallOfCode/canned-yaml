@@ -4,139 +4,141 @@
 #include <string>
 #include <vector>
 
-bool def_version(YAML::Node ip)
+using namespace std;
+
+bool is_string(YAML::Node const &node)
 {
-    std::cout<<"reached here";
-    if(!ip.IsSequence())
+    try
     {
-        std::cout<<"ip_addr_acl defined is not an array";
-        return false;
+        // convert
+        string tmp = node.as<string>();
+        // add validate
     }
-    
-    if(!def_rules(ip))
-    {   
-         std::cout<<"ip_addr_acl doesn't staisfy rule";
-         return false;
+    catch (YAML::BadConversion)
+    {
+        return false;
     }
     return true;
 }
 
-bool def_ip_addr_acl(YAML::Node ip)
+bool is_bool(YAML::Node const &node)
 {
-    std::cout<<"reached here";
-    if(!ip.IsSequence())
+    try
     {
-        std::cout<<"ip_addr_acl defined is not an array";
-        return false;
+        // convert
+        bool tmp = node.as<bool>();
     }
-    
-    if(!def_rules(ip))
-    {   
-         std::cout<<"ip_addr_acl doesn't staisfy rule";
-         return false;
+    catch (YAML::BadConversion)
+    {
+        return false;
     }
     return true;
 }
 
-bool def_inbound(YAML::Node ip)
+bool is_int(YAML::Node const &node)
 {
-  
-    std::cout<<"\n reached inbound";
-   /* if(ip.IsSequence())
+    try
     {
-        std::cout<<"\n ip_addr_acl an array";
+        // convert
+        int tmp = node.as<int>();
     }
-    if(ip.IsMap())
-        {
-        std::cout<<"\n ip_addr_acl an map";
-        }
-    if(ip.IsScalar())
-          {
-          std::cout<<"\n ip_addr_acl SCALAR";
-          }
-    if(ip.IsDefined())
-              {
-              std::cout<<"\n ip_addr_acl def";
-              }*/
-    return true;
-}
-bool def_outbound(YAML::Node ip)
-{
-  
-    std::cout<<"\n reached outbound";
-   /* if(ip.IsSequence())
+    catch (YAML::BadConversion)
     {
-        std::cout<<"\n ip_addr_acl an array";
+        return false;
     }
-    if(ip.IsMap())
-        {
-        std::cout<<"\n ip_addr_acl an map";
+    return true;
+}
+
+bool is_double(YAML::Node const &node)
+{
+}
+
+void verify_version(YAML::Node const &node)
+{
+    if (!node.IsScalar() && !is_string(node))
+    {
+        throw "failed";
+    }
+}
+
+void verify_ip_addr_acl(YAML::Node const &node)
+{
+
+    if (!node.IsSequence())
+    {
+        throw "failed";
+    }
+    for (auto const &n : node)
+    {
+        verify_rule(n);
+    }
+}
+
+bool verify_ip_allow(YAML::Node const &node)
+{
+    try {
+    bool found_ip_addr_acl = false;
+    for (auto const &n : node)
+    {
+        string key = n.first;
+        YAML::Node value = n.second;
+
+        if(key == "version"){
+            verify_version(value);
         }
-    if(ip.IsScalar())
-          {
-          std::cout<<"\n ip_addr_acl SCALAR";
-          }
-    if(ip.IsDefined())
-              {
-              std::cout<<"\n ip_addr_acl def";
-              }*/
+        else if(key == "ip_addr_acl"){
+            found_ip_addr_acl=true;
+            verify_ip_addr_acl(value);
+        }
+        else{
+            throw "unknown value";
+        }
+    }
+    if(!found_ip_addr_acl) throw "ip_addr_acl not found";
+    }
+    catch(...){
+        return false;
+    }
     return true;
 }
-bool def_action(YAML::Node ip)
+
+std::string node_type(YAML::Node const &node)
 {
-  
-    std::cout<<"\n reached action";
- 
-    return true;
+
+    switch (node.Type())
+    {
+    case (YAML::NodeType::Null):
+        return "NULL";
+    case (YAML::NodeType::Undefined):
+        return "Undefined";
+    case (YAML::NodeType::Scalar):
+        return "Scalar";
+    case (YAML::NodeType::Sequence):
+        return "Sequence";
+    case (YAML::NodeType::Map):
+        return "Map";
+    }
+    return "Unknown";
 }
-bool def_methods(YAML::Node ip)
+
+void dump_node(YAML::Node node, int indent)
 {
-  
-    std::cout<<"\n reached methods";
- 
-    return true;
+    for (auto n : node)
+    {
+        cout << n.first << " " << node_type(n.second) << " " << std::boolalpha << n.second.as<int>() << endl;
+        break;
+    }
 }
+
 int main()
 {
     YAML::Node config = YAML::LoadFile("./config.json");
-    if(config["ip_addr_acl"])
-    {
-        std::cout<<"ip_addr_acl\n";
-        def_ip_addr_acl(config["ip_addr_acl"]);
-    }
-    else
-    {
-       std::cout<<"ip_addr_acl is missing";
-       return 0;
-    }
- 
-    for (auto dir : config["ip_addr_acl"])
-    {
-        if(dir["inbound"]) {
-	    def_inbound(dir["inbound"]);
-	}
-        if(dir["outbound"]){
-	    def_outbound(dir["outbound"]);
-	}
-        if(dir["action"]){
-	    def_action(dir["action"]);}
-         if(dir["methods"]){
-	  def_methods(dir["methods"]);} 
-    }
-            
-           // std::cout<<config["ip_addr_acl"];
+    cout << node_type(config) << true << endl;
+    dump_node(config, 1);
 
-    //    YAML::Node config = YAML::LoadFile("./config.yaml");
+    verify_ip_allow(config);
 
-return 0;
+    return 0;
 }
-/*
 
-   /*YAML::Node test = (config["ip_addr_acl"]);
-    if(test["inbound"])
-    {
-        std::cout<<"SEEEEEEEEEEEEEEEEEEEEEEEEEE:WQ:wqe\n";
-        def_ip_addr_acl(config["ip_addr_acl"]);
-    }*
-            std::cout<<"SSSSS:wqe\n";
-*/
+Message Input
