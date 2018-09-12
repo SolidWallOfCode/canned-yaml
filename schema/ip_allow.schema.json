@@ -1,0 +1,106 @@
+{
+  "$schema": "https://github.com/apache/trafficserver/tree/master/configs/ip_allow.schema.json",
+  "title": "Traffic Server IP Allow Configuration",
+  "description": "IP ACL configuration file structure. Licensed under Apache V2 https://www.apache.org/licenses/LICENSE-2.0",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Configuration format version."
+    },
+    "ip_addr_acl": {
+      "description": "Root tag for IP address ACL configuration",
+      "type": "array",
+      "items": {
+        "description": "Rules.",
+        "$ref": "#/definitions/rule"
+      }
+    }
+  },
+  "required": [ "ip_addr_acl" ],
+  "definitions": {
+    "range": {
+      "description": "A range of IP addresses in a single family.",
+      "anyOf": [
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "string",
+            "description": "IP address."
+          }
+        },
+        {
+          "type": "string",
+          "description": "A single IP address, a dash separated pair of IP addresses, or a CIDR notation network."
+        }
+      ]
+    },
+    "action": {
+      "description": "Enforcement action.",
+      "type": "string",
+      "enum": [ "allow", "deny" ]
+    },
+    "methods": {
+      "description": "Methods to check.",
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "Method name"
+        },
+        {
+          "type": "array",
+          "description": "List of method names.",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "description": "Method name"
+          }
+        }
+      ]
+    },
+    "inbound-rule": {
+      "description": "Rule for inbound connections.",
+      "type": "object",
+      "properties": {
+        "inbound": {
+          "description": "The IP addresses to match against.",
+          "$ref": "#/definitions/range"
+        },
+        "action": {
+          "$ref": "#/definitions/action"
+        },
+        "methods": {
+          "$ref": "#/definitions/methods"
+        }
+      },
+      "required": [ "inbound", "action" ]
+    },
+    "outbound-rule": {
+      "description": "Rule for outbound connections.",
+      "type": "object",
+      "properties": {
+        "outbound": {
+          "description": "The IP addresses to match against.",
+          "$ref": "#/definitions/range"
+        },
+        "action": {
+          "$ref": "#/definitions/action"
+        },
+        "methods": {
+          "$ref": "#/definitions/methods"
+        }
+      },
+      "required": [ "outbound", "action" ]
+    },
+    "rule": {
+      "type": "object",
+      "description": "An access control rule.",
+      "oneOf": [
+        { "$ref": "#/definitions/inbound-rule" },
+        { "$ref": "#/definitions/outbound-rule" }
+      ]
+    }
+  }
+}
