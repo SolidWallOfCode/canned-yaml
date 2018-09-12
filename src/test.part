@@ -1,0 +1,19 @@
+
+Import('*')
+PartVersion("0.0.1")
+PartName("test")
+
+DependsOn([Component("yaml-cpp")])
+
+env.AppendUnique(
+    # add these to C++ compiler (CCFLAGS are for both c and C++, CFLAGS for C only)
+    CXXFLAGS=["-std=c++11"],
+)
+
+env['PDB']="test.pdb"
+files = [
+    "text.cpp"
+]
+env.InstallTarget(
+    env.Program("test",files)
+    )
