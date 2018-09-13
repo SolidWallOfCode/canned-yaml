@@ -1,0 +1,8 @@
+{
+  "ip_addr_acl" : [
+     { "inbound": "127.0.0.1", "action": "allow" },
+     { "inbound": "::1", "action": "allow" },
+     { "inbound": "0/0", "action": "deny", "methods": [ "PURGE", "PUSH", "DELETE" ] },
+     { "inbound": "::/0", "action": "deny", "methods": [ "PURGE", "PUSH", "DELETE" ] }
+     ]
+}
