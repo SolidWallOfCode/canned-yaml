@@ -5,7 +5,9 @@ import argparse
 from pathlib import Path, PurePath
 import os
 import re
-import yaml
+# pip install ruamel.yaml for this
+import ruamel.yaml
+from ruamel.yaml import YAML
 
 SEQUENCE_RELATED_KEYS = set(['items', 'minItems', 'maxItems'])
 MAP_RELATED_KEYS = set(['require', 'properties'])
@@ -202,6 +204,7 @@ print("Processing {} to {},{} in class {}\n".format(args.schema, args.header, ar
 with open(args.schema, 'r') as input:
     out_header = None
     out_source = None
+    yaml = YAML()
     try:
         root = yaml.load(input)
     except yaml.YAMLError as ex:
@@ -217,8 +220,8 @@ with open(args.schema, 'r') as input:
         out_source = open(args.source, 'w')
     except ex:
         print("Unable to open source file '{}' - {}", args.source, ex)
-
-    if type(root) is dict:
+    debug = type(root)
+    if isinstance(root, ruamel.yaml.comments.CommentedMap):
         context = { 'hdr' : out_header, 'src' : out_source, 'prefix' : '  ', 'level' : 0}
         out_source.write('#include <functional>\n#include <array>\n#include <algorithm>\n#include <iostream>\n\n')
         out_source.write('#include "{}"\n\n'.format(args.header))
