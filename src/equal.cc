@@ -26,7 +26,7 @@ bool equal(const YAML::Node & lhs, const YAML::Node & rhs) {
         return true;
       }
     } else {
-      return lhs == rhs;
+      return lhs.Scalar() == rhs.Scalar();
     }
   }
   return zret;

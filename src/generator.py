@@ -4,6 +4,7 @@ import io
 import argparse
 from pathlib import Path, PurePath
 import os
+import re
 import yaml
 
 SEQUENCE_RELATED_KEYS = set(['items', 'minItems', 'maxItems'])
@@ -25,6 +26,11 @@ def could_be_type(node, candidate):
 def must_be_type(node, candidate):
     return 'type' in node and node['type'] == candidate
 
+def description_of(node):
+    if 'description' in node:
+        return 'R"yzy({})yzy"'.format(node['description'])
+    return '"No description available"'
+
 def definition(path):
     if path in DEFINITIONS:
         return DEFINITIONS[path]
@@ -35,21 +41,21 @@ def emit_type_check(context, types):
     cond = ' && '.join('{}.{}()'.format(context['var'], SCHEMA_TYPES[x]) for x in types)
     context['src'].write('{}if (!({})) {{ return false; }}; // type check\n'.format(context['prefix'], cond))
 
-def emit_minitems_check(context, count):
+def emit_minitems_check(context, node, count):
     src = context['src']
     prefix = context['prefix']
     var = context['var']
 
-    src.write('{}if ({}.IsSequence() && {}.size() < {}) {{ return false; }}\n'.format(prefix, var, var, count))
+    src.write('{}if ({}.IsSequence() && {}.size() < {}) {{ return boom({}, {}, "minItems"); }}\n'.format(prefix, var, var, count, var, description_of(node)))
 
-def emit_maxitems_check(context, count):
+def emit_maxitems_check(context, node, count):
     src = context['src']
     prefix = context['prefix']
     var = context['var']
 
-    src.write('{}if ({}.IsSequence() && {}.size() > {}) {{ return false; }}\n'.format(prefix, var, var, count))
+    src.write('{}if ({}.IsSequence() && {}.size() > {}) {{ return boom({}, {}, "maxItems"); }}\n'.format(prefix, var, var, count, var, description_of(node)))
 
-def emit_required_check(context, keys):
+def emit_required_check(context, node, keys):
     src = context['src']
     prefix = context['prefix']
     level = context['level']
@@ -58,10 +64,10 @@ def emit_required_check(context, keys):
     src.write("""\
 {}for ( auto key : {{ {} }} ) {{
 {}  if (!{}[key]) {{
-{}    return false;
+{}    return boom({}, {}, "Required tag missing");
 {}  }}
 {}}}
-""".format(prefix, init_list, prefix, var, prefix, prefix, prefix))
+""".format(prefix, init_list, prefix, var, prefix, var, description_of(node), prefix, prefix))
 
 def emit_property_check(context, properties):
     ctx = context.copy()
@@ -89,7 +95,8 @@ def validate_node(context, node):
     var = context['var']
 
     if '$ref' in node:
-        node.update(definition(node['$ref']))
+        src.write('{}if (! definition::{}({})) {{ return false; }}\n'.format(prefix, DEFINITIONS[node['$ref']], var))
+        return; # "All other properties in a "$ref" object MUST be ignored."
 
     if 'type' in node:
         t = node['type']
@@ -103,13 +110,13 @@ def validate_node(context, node):
             src.write('{}if ({}.IsMap() {{\n'.format(prefix, ctx['var']))
             ctx['prefix'] = prefix + '  '
 
+        if 'required' in node:
+            src.write('{}// check required key(s)\n'.format(prefix))
+            emit_required_check(ctx, node, node['required'])
+
         if 'properties' in node:
             src.write('{}// check properties\n'.format(prefix))
             emit_property_check(ctx, node['properties'])
-
-        if 'required' in node:
-            src.write('{}// check required type(s)\n'.format(prefix))
-            emit_required_check(ctx, node['required'])
 
         if not must_be_type(node, 'object'):
             ctx['prefix'] = prefix
@@ -121,10 +128,10 @@ def validate_node(context, node):
             ctx['prefix'] = prefix + '  '
 
         if 'minItems' in node:
-            emit_minitems_check(ctx, node['minItems'])
+            emit_minitems_check(ctx, node, node['minItems'])
 
         if 'maxItems' in node:
-            emit_maxitems_check(ctx, node['maxItems'])
+            emit_maxitems_check(ctx, node, node['maxItems'])
 
         if 'items' in node:
             items = node['items']
@@ -143,18 +150,27 @@ def validate_node(context, node):
             ctx['prefix'] = prefix
             src.write('{}}}\n'.format(prefix))
 
-    if 'oneOf' in node:
-        schemas = node['oneOf']
+    if 'oneOf' in node or 'anyOf' in node:
+        if 'oneOf' in node:
+            schemas = node['oneOf']
+            tag = 'oneOf'
+        else:
+            schemas = node['anyOf']
+            tag = 'anyOf'
         ctx['prefix'] = prefix + '    '
         ctx['var'] = 'node'
-        src.write('{}// oneOf\n'.format(prefix))
+        src.write('{}// {}\n'.format(prefix, tag))
         src.write('{}std::array<Validator, {}> valid = {{\n'.format(prefix, len(schemas)))
         for schema in schemas:
             src.write('{}  [] (const YAML::Node & node) -> bool {{\n'.format(prefix))
             validate_node(ctx, schema)
-            src.write('{}    return true;\n{}  }},\n'.format(prefix, prefix))
+            src.write('{}    return true;\n{}  }},\n'.format(prefix, prefix, prefix))
         src.write('{}}};\n'.format(prefix))
-        src.write('{}return std::any_of(valid.begin(), valid.end(), [&] (const Validator & v) {{ return v({}); }});\n'.format(prefix, var))
+        if tag == 'anyOf':
+            src.write('{}if (! std::any_of(valid.begin(), valid.end(), [&] (const Validator & v) {{ return v({}); }})) {{ return boom({}, {}, "any_of"); }};\n'.format(prefix, var, var, description_of(node)))
+        else:
+            src.write('{}size_t count = 0;\n{}for ( const auto & v : valid ) {{ if (v({}) && ++count > 1) return false; }}\n{}if (count == 0) {{ return boom({}, {}, "oneOf"); }}\n'.format(prefix, prefix, var, prefix, var, description_of(node)))
+
 
     if 'enum' in node:
         values = node['enum']
@@ -204,19 +220,36 @@ with open(args.schema, 'r') as input:
 
     if type(root) is dict:
         context = { 'hdr' : out_header, 'src' : out_source, 'prefix' : '  ', 'level' : 0}
-        out_source.write('#include <functional>\n#include <array>\n#include <algorithm>\n\n')
+        out_source.write('#include <functional>\n#include <array>\n#include <algorithm>\n#include <iostream>\n\n')
         out_source.write('#include "{}"\n\n'.format(args.header))
         out_source.write('using Validator = std::function<bool (const YAML::Node &)>;\n\n')
-        out_header.write('#include "yaml-cpp/yaml.h"\n\n')
-        out_header.write("class {} {{\n  bool operator()(const YAML::Node &n);\n".format(args.classname))
-        out_source.write('extern bool equal(const YAML::Node &, const YAML::Node &);')
-        out_source.write('bool {}::operator()(const YAML::Node& n_0) {{\n'.format(args.classname))
-        context['var'] = 'n_0'
+        out_header.write('#include <string_view>\n#include "yaml-cpp/yaml.h"\n\n')
+        out_header.write('class {} {{\npublic:\n  bool operator()(const YAML::Node &n);\n'.format(args.classname))
+        out_source.write('extern bool equal(const YAML::Node &, const YAML::Node &);\n\n')
+
+        out_source.write('''\
+bool boom(const YAML::Node & node, std::string_view desc, std::string_view reason) {
+  std::cout << "Validation of " << desc << " failed: " << reason << " at line " << node.Mark().line << std::endl;
+  return false;          
+};
+
+''')
 
         if 'definitions' in root:
             prefix = '#/definitions/'
+            cleanup = re.compile('((?:^[0-9])|[^0-9a-zA-Z])')
+            out_source.write('namespace definition {\n')
+            context['var'] = 'n'
             for key,value in root['definitions'].items():
-                DEFINITIONS[prefix + key] = value
+                func = 'v_' + cleanup.sub('_', key)
+                DEFINITIONS[prefix + key] = func
+                out_source.write('bool {} (const YAML::Node & n) {{\n'.format(func))
+                validate_node(context, value)
+                out_source.write('  return true;\n}\n\n')
+            out_source.write('} // definition\n\n')
+
+        out_source.write('bool {}::operator()(const YAML::Node& n_0) {{\n'.format(args.classname))
+        context['var'] = 'n_0'
 
         validate_node(context, root)
         out_source.write('  return true;\n}\n')
