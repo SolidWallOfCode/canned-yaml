@@ -59,10 +59,9 @@ def emit_required_check(context, keys):
 {}for ( auto key : {{ {} }} ) {{
 {}  if (!{}[key]) {{
 {}    return false;
-{}    break;
 {}  }}
 {}}}
-""".format(prefix, init_list, prefix, var, prefix, prefix, prefix, prefix))
+""".format(prefix, init_list, prefix, var, prefix, prefix, prefix))
 
 def emit_property_check(context, properties):
     ctx = context.copy()
@@ -146,20 +145,24 @@ def validate_node(context, node):
 
     if 'oneOf' in node:
         schemas = node['oneOf']
+        ctx['prefix'] = prefix + '    '
+        ctx['var'] = 'node'
         src.write('{}// oneOf\n'.format(prefix))
-        src.write('{}std::array<Validator, {}> val = {{\n'.format(prefix, len(schemas)))
+        src.write('{}std::array<Validator, {}> valid = {{\n'.format(prefix, len(schemas)))
         for schema in schemas:
             src.write('{}  [] (const YAML::Node & node) -> bool {{\n'.format(prefix))
-            ctx['prefix'] = prefix + '    '
-            ctx['var'] = 'node'
             validate_node(ctx, schema)
-            src.write('{}}},\n'.format(prefix))
+            src.write('{}    return true;\n{}  }},\n'.format(prefix, prefix))
         src.write('{}}};\n'.format(prefix))
-        src.write('{}if (std::any_of(val.begin(), val.end(), [&] (const Validator & v) {{ return v({}); }})) {{\n'.format(prefix, var))
-        src.write('{}  return false;\n'.format(prefix))
-        src.write('{}}}\n'.format(prefix))
+        src.write('{}return std::any_of(valid.begin(), valid.end(), [&] (const Validator & v) {{ return v({}); }});\n'.format(prefix, var))
 
-    src.write('{}return true;\n'.format(prefix))
+    if 'enum' in node:
+        values = node['enum']
+        vdefs = ', '.join('YAML::Load(R"uthira_m({})uthira_m")'.format(n) for n in values)
+        src.write('{}static std::array<YAML::Node, {}> values = {{{}}};\n'.format(prefix, len(values), vdefs, prefix))
+        src.write('{}if (! std::any_of(values.begin(), values.end(), [&] (const YAML::Node& enum_node) -> bool {{ return equal(enum_node, {}); }})) {{ return false; }}\n'.format(prefix, var))
+
+#    src.write('{}return true;\n'.format(prefix))
 
 # ------
 
@@ -206,6 +209,7 @@ with open(args.schema, 'r') as input:
         out_source.write('using Validator = std::function<bool (const YAML::Node &)>;\n\n')
         out_header.write('#include "yaml-cpp/yaml.h"\n\n')
         out_header.write("class {} {{\n  bool operator()(const YAML::Node &n);\n".format(args.classname))
+        out_source.write('extern bool equal(const YAML::Node &, const YAML::Node &);')
         out_source.write('bool {}::operator()(const YAML::Node& n_0) {{\n'.format(args.classname))
         context['var'] = 'n_0'
 
@@ -215,5 +219,5 @@ with open(args.schema, 'r') as input:
                 DEFINITIONS[prefix + key] = value
 
         validate_node(context, root)
-        out_source.write('}\n')
+        out_source.write('  return true;\n}\n')
         out_header.write('};\n')
