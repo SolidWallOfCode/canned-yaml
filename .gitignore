@@ -36,4 +36,4 @@ build-env/*
 .sconsign.dblite
 _*
 
-
+cmake-build-debug
