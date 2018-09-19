@@ -22,12 +22,9 @@ ExternalProject_Add(LibSWOC
         CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${CMAKE_HOME_DIRECTORY}
 )
 
-find_library(LIB_SWOC "libswoc++.a" PATHS "lib")
-
-find_library(POSIX_THREAD_LIB pthread)
-
-link_libraries(${LIB_YAML} ${LIB_SWOC} ${POSIX_THREAD_LIB})
-
 add_executable(canner
     src/canner.cc
 )
+add_dependencies(canner LibSWOC YAML_CPP)
+target_link_libraries(canner ${CMAKE_HOME_DIRECTORY}/lib/libyaml-cpp.a ${CMAKE_HOME_DIRECTORY}/lib/libswoc++.a ${POSIX_THREAD_LIB})
+
