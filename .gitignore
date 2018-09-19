@@ -37,3 +37,9 @@ build-env/*
 _*
 
 cmake-build-debug
+lib
+.idea
+include/gmock/*
+include/gtest/*
+include/swoc/*
+include/yaml-cpp/*
