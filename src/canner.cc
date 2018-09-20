@@ -27,6 +27,7 @@
 #include <iostream>
 #include <fstream>
 #include <tuple>
+#include <unordered_map>
 
 #include "swoc/TextView.h"
 #include "swoc/bwf_base.h"
@@ -34,6 +35,10 @@
 #include "swoc/Errata.h"
 
 #include "yaml-cpp/yaml.h"
+
+using swoc::Severity;
+using swoc::Errata;
+using swoc::TextView;
 
 namespace {
 std::array<option, 4> Options = {{
@@ -43,12 +48,17 @@ std::array<option, 4> Options = {{
                                      {nullptr, 0, nullptr, 0}
                                  }};
 
-template<typename ... Args>
-void Error(const swoc::TextView &fmt, Args &&... args) {
-  std::string text;
-  swoc::bwprintv(text, fmt, std::forward_as_tuple(args...));
-  std::cerr << text << std::endl;
-}
+static const std::string DEFINITION_PREFIX{"#/definitions/"};
+
+enum PRIMITIVE {
+  NIL,
+  BOOL,
+  OBJECT,
+  ARRAY,
+  NUMBER,
+  STRING,
+  INVALID
+};
 
 }
 
@@ -59,73 +69,167 @@ BufferWriter & bwformat(BufferWriter & w, const bwf::Spec & spec, const file::pa
 }
 }
 
-using swoc::Severity;
-using swoc::Errata;
-using swoc::TextView;
+struct Context {
+
+  std::string hdr_path;
+  std::ofstream hdr_file;
+  std::string src_path;
+  std::ofstream src_file;
+  std::string class_name;
+  Errata notes;
+
+  int src_indent {0}; // Indent level.
+  int hdr_indent {0};
+
+  void indent_src();
+  void exdent_src();
+  void indent_hdr();
+  void exdent_hdr();
+
+  // Working methods.
+  Errata generate_define(YAML::Node const& key, YAML::Node const& value);
+  // Base node validation - handles top level tags and dispatches as needed.
+  Errata validate_node(YAML::Node const& node);
+
+  template < typename ... Args > void src_out(std::string_view fmt, Args && ... args);
+
+  template < typename ... Args > void hdr_out(std::string_view fmt, Args && ... args);
+
+  void out(std::ofstream & s, TextView text, int indent);
+
+  using Definitions = std::unordered_map<std::string, std::string>;
+  Definitions definitions;
+};
+
+void Context::exdent_hdr() { --hdr_indent; }
+void Context::exdent_src() { --src_indent; }
+void Context::indent_hdr() { ++hdr_indent; }
+void Context::indent_src() { ++hdr_indent; }
+
+template < typename ... Args > void Context::src_out(std::string_view fmt, Args && ... args) {
+  static std::string tmp; // static makes for better memory reuse.
+  swoc::bwprintv(tmp, fmt, std::forward_as_tuple(args...));
+  this->out(src_file, tmp, src_indent);
+}
+
+template < typename ... Args > void Context::hdr_out(std::string_view fmt, Args && ... args) {
+  static std::string tmp; // static makes for better memory reuse.
+  swoc::bwprintv(tmp, fmt, std::forward_as_tuple(args...));
+  this->out(hdr_file, tmp, hdr_indent);
+}
+
+void Context::out(std::ofstream& s, TextView text, int indent) {
+  while (text) {
+    auto line = text.take_prefix_at('\n');
+    if (!line.empty()) {
+      for ( int i = indent ; i > 0 ; --i ) {
+        s << "  ";
+      }
+      s << line;
+    }
+    s << std::endl;
+  }
+}
+
+Errata Context::validate_node(YAML::Node const &node) {
+  return notes;
+}
+
+Errata Context::generate_define(YAML::Node const& key, YAML::Node const& value) {
+  std::string name = key.Scalar();
+  std::transform(name.begin(), name.end(), name.begin(), [](char c) { return isalnum(c) ? c : '_'; });
+  definitions[DEFINITION_PREFIX + key.Scalar()] = name;
+  hdr_out("bool {} (swoc::Errata erratum, YAML::Node const& node);", name);
+
+  src_out("bool {}::definition::{} (swoc::Errata erratum, YAML::Node const& node) {{", class_name, name);
+  indent_src();
+  validate_node(value);
+  exdent_src();
+  src_out("}}");
+  return notes;
+}
+
+Errata process_definitions(Context& ctx, YAML::Node const& node) {
+  if (! node.IsMap()) {
+    return ctx.notes.error("'definitions' node is not a map");
+  }
+  ctx.hdr_out("struct definition {{\n");
+  ctx.indent_hdr();
+  for ( auto && pair: node ) {
+    ctx.generate_define(pair.first, pair.second);
+  }
+  ctx.exdent_hdr();
+  ctx.hdr_out("}};\n");
+  return ctx.notes;
+}
 
 Errata process(int argc, char *argv[]) {
-  swoc::Errata notes;
   int zret;
   int idx;
-  std::string hdr_path;
-  std::string src_path;
-  std::string class_name;
+  Context ctx;
   std::string tmp;
 
   while (-1 != (zret = getopt_long(argc, argv, ":", Options.data(), &idx))) {
     switch (zret) {
-      case ':' : Error("'{}' requires a value", argv[optind-1]); break;
-      case 'h' : hdr_path = argv[optind-1]; break;
-      case 's' : src_path = argv[optind-1]; break;
-      case 'c' : class_name = argv[optind-1]; break;
+      case ':' : ctx.notes.error("'{}' requires a value", argv[optind-1]); break;
+      case 'h' : ctx.hdr_path = argv[optind-1]; break;
+      case 's' : ctx.src_path = argv[optind-1]; break;
+      case 'c' : ctx.class_name = argv[optind-1]; break;
       default:
-        notes.note(Severity::ERROR, "Unknown option '{}' - ignored", char(zret), argv[optind-1]);
+        ctx.notes.warn("Unknown option '{}' - ignored", char(zret), argv[optind-1]);
         break;
     }
   }
 
+  if (!ctx.notes.is_ok()) {
+    return ctx.notes;
+  }
+
   if (optind >= argc) {
-    return notes.error("An input schema file is required");
+    return ctx.notes.error("An input schema file is required");
   }
 
   swoc::file::path schema_path{argv[optind]};
   std::error_code ec;
   std::string content = swoc::file::load(schema_path, ec);
 
-  notes.info("Loaded schema file '{}' - {} bytes", schema_path, content.size());
+  ctx.notes.info("Loaded schema file '{}' - {} bytes", schema_path, content.size());
 
   YAML::Node root;
   try {
     root = YAML::Load(content);
   } catch (std::exception & ex) {
-    return notes.error("Loading failed: {}", ex.what());
+    return ctx.notes.error("Loading failed: {}", ex.what());
   }
 
-  std::ofstream hdr_file;
-  std::ofstream src_file;
-  hdr_file.open(hdr_path.c_str(), std::ofstream::trunc);
-  if (!hdr_file.is_open()) {
-    return notes.error("Failed to open header output file '{}'", hdr_path);
+  ctx.hdr_file.open(ctx.hdr_path.c_str(), std::ofstream::trunc);
+  if (!ctx.hdr_file.is_open()) {
+    return ctx.notes.error("Failed to open header output file '{}'", ctx.hdr_path);
   }
-  src_file.open(src_path.c_str(), std::ofstream::trunc);
-  if (!src_file.is_open()) {
-    return notes.error("Failed to open source output file '{}'", src_path);
+  ctx.src_file.open(ctx.src_path.c_str(), std::ofstream::trunc);
+  if (!ctx.src_file.is_open()) {
+    return ctx.notes.error("Failed to open source output file '{}'", ctx.src_path);
   }
 
   if (!root.IsMap()) {
-    return notes.error("Root node must be a map");
+    return ctx.notes.error("Root node must be a map");
   }
 
-  swoc::bwprint(tmp, "#include <functional>\n#include <array>\n#include <algorithm>\n#include <iostream>\n\n"
+  ctx.src_out("#include <functional>\n#include <array>\n#include <algorithm>\n#include <iostream>\n\n"
               "#include \"{}\"\n\n"
               "using Validator = std::function<bool (const YAML::Node &)>;\n\n"
-              "extern bool equal(const YAML::Node &, const YAML::Node &);\n\n", hdr_path);
-  src_file << tmp;
-  swoc::bwprint(tmp, "#include <string_view>\n#include \"yaml-cpp/yaml.h\"\n\n"
-                     "class {} {{\npublic:\n  bool operator()(const YAML::Node &n);\n", class_name);
-  hdr_file << tmp;
+              "extern bool equal(const YAML::Node &, const YAML::Node &);\n\n", ctx.hdr_path);
 
-  return notes;
+  ctx.hdr_out("#include <string_view>\n#include \"yaml-cpp/yaml.h\"\n\n");
+  ctx.hdr_out("class {} {{\npublic:\n", ctx.class_name);
+  ctx.indent_hdr();
+  ctx.hdr_out("bool operator()(const YAML::Node &n);\n", ctx.class_name);
+
+
+  if (root["definitions"]) {
+    process_definitions(ctx, root["definitions"]);
+  }
+  return ctx.notes;
 }
 
 int main(int argc, char * argv[]) {
