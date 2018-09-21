@@ -28,11 +28,13 @@
 #include <fstream>
 #include <tuple>
 #include <unordered_map>
+#include <bitset>
 
 #include "swoc/TextView.h"
 #include "swoc/bwf_base.h"
 #include "swoc/swoc_file.h"
 #include "swoc/Errata.h"
+#include "swoc/Lexicon.h"
 
 #include "yaml-cpp/yaml.h"
 
@@ -60,7 +62,22 @@ enum PRIMITIVE {
   INVALID
 };
 
-}
+swoc::Lexicon<PRIMITIVE> PrimitiveType{
+    {{NIL, "null"},
+        {BOOL, "boolean"},
+        {OBJECT, "object"},
+        {ARRAY, "array"},
+        {NUMBER, "number"},
+        {STRING, "string"},
+        {INVALID, "invalid"}}
+};
+
+[[maybe_unused]] static bool INITIALIZED  = (
+    PrimitiveType.set_default(INVALID).set_default("INVALID"),
+    true);
+
+using TypeSet = std::bitset<PRIMITIVE::INVALID>;
+};
 
 // BufferWriter formatting for specific types.
 namespace swoc {
@@ -97,6 +114,9 @@ struct Context {
 
   void out(std::ofstream & s, TextView text, int indent);
 
+  // Error message generators
+  Errata Err_Bad_Type(const YAML::Node & node);
+
   using Definitions = std::unordered_map<std::string, std::string>;
   Definitions definitions;
 };
@@ -131,7 +151,40 @@ void Context::out(std::ofstream& s, TextView text, int indent) {
   }
 }
 
+Errata Context::Err_Bad_Type(const YAML::Node &node) {
+  swoc::LocalBufferWriter<1024> w;
+
+}
+
 Errata Context::validate_node(YAML::Node const &node) {
+  if (node["$ref"]) {
+  } else {
+    TypeSet types;
+    if (node["type"]) {
+      auto type_node { node["type"] };
+      if (type_node.IsScalar()) {
+        auto ptype = PrimitiveType[type_node.Scalar()];
+        if (INVALID == ptype) {
+          notes.error("Type '{}' in 'type' node at line {} is not a valid type.",
+                      type_node.Scalar(), type_node.Mark().line);
+        } else {
+          types[ptype] = true;
+        }
+      } else if (type_node.IsSequence()) {
+        for ( auto n : type_node ) {
+          auto ptype = PrimitiveType[n.Scalar()];
+          if (INVALID == ptype) {
+            notes.error("Type '{}' in 'type' node at line {} is not a valid type.",
+                        n.Scalar(), type_node.Mark().line);
+          } else {
+            types[ptype] = true;
+          }
+        }
+      } else {
+        return notes.error("'type' node at line {} is neither a string nor a sequence of strings", node.Mark().line);
+      }
+    };
+  }
   return notes;
 }
 
