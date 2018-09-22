@@ -107,7 +107,7 @@ def validate_node(context, node):
         elif type(t) == list:
             emit_type_check(ctx, t)
 
-    if could_be_type(node, 'object') and MAP_RELATED_KEYS & set(node.keys()):
+    if could_be_type(node, 'object') and MAP_RENLATED_KEYS & set(node.keys()):
         if not must_be_type(node, 'object'):
             src.write('{}if ({}.IsMap() {{\n'.format(prefix, ctx['var']))
             ctx['prefix'] = prefix + '  '

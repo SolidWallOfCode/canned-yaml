@@ -29,6 +29,8 @@
 #include <tuple>
 #include <unordered_map>
 #include <bitset>
+#include <vector>
+#include <limits>
 
 #include "swoc/TextView.h"
 #include "swoc/bwf_base.h"
@@ -52,6 +54,7 @@ std::array<option, 4> Options = {{
 
 static const std::string DEFINITION_PREFIX{"#/definitions/"};
 
+/// JSON Schema types.
 enum class SchemaType {
   NIL,
   BOOL,
@@ -73,15 +76,16 @@ swoc::Lexicon<SchemaType> SchemaTypeName{{
                                                {SchemaType::STRING, "string"},
                                        }};
 
-swoc::Lexicon<SchemaType> SchemaTypeCheck{{
+std::map<SchemaType, std::string> SchemaTypeCheck{{
                                                {SchemaType::NIL, "IsNull"},
-                                               {SchemaType::BOOL, "IsBoolean"},
+                                               {SchemaType::BOOL, "IsScalar"},
                                                {SchemaType::OBJECT, "IsMap"},
                                                {SchemaType::ARRAY, "IsSequence"},
-                                               {SchemaType::NUMBER, "IsNumber"},
+                                               {SchemaType::NUMBER, "IsScalar"},
                                                {SchemaType::STRING, "IsScalar"},
                                        }};
 
+/// Tags that apply to an Object.
 enum class ObjectTag {
   PROPERTIES,
   REQUIRED,
@@ -93,6 +97,7 @@ swoc::Lexicon<ObjectTag> ObjectTagName {{
                                              { ObjectTag::REQUIRED, "required" }
                                      }};
 
+/// Tags that apply to an Array.
 enum class ArrayTag {
   ITEMS,
   MIN_ITEMS,
@@ -106,6 +111,7 @@ swoc::Lexicon<ArrayTag> ArrayTagName {{
                                            { ArrayTag::MAX_ITEMS, "maxItems"}
                                      }};
 
+// File scope initialization.
 [[maybe_unused]] static bool INITIALIZED  = (
 
             SchemaTypeName.set_default(SchemaType::INVALID).set_default("INVALID"),
@@ -191,7 +197,8 @@ struct Context {
   int hdr_indent {0};
   bool hdr_sol_p {true};
 
-  int node_idx {1}; ///< Index suffix for locally declared nodes.
+  int var_idx {1}; ///< Index suffix for locally declared nodes.
+  std::string var_name();
 
   void indent_src();
   void exdent_src();
@@ -199,16 +206,18 @@ struct Context {
   void exdent_hdr();
 
   // Working methods.
+  Errata process_definitions(YAML::Node const& node);
   Errata generate_define(YAML::Node const& key, YAML::Node const& value);
   // Base node validation - handles top level tags and dispatches as needed.
   Errata validate_node(YAML::Node const& node, std::string_view const& var);
 
   // property checks
-  Errata prop_type(const YAML::Node & node, TypeSet & types);
+  Errata process_type_value(const YAML::Node & node, TypeSet & types);
 
   // code generation
   void emit_required_check(YAML::Node const& node, std::string_view const & var);
   void emit_type_check(TypeSet const& types, std::string_view const& var);
+  void emit_min_items_check(std::string_view const& node, uintmax_t limit);
 
   // output
   template < typename ... Args > void src_out(std::string_view fmt, Args && ... args);
@@ -264,6 +273,16 @@ void Context::out(std::ofstream& s, TextView text, bool & sol_p, int indent) {
   }
 }
 
+std::string Context::var_name() {
+  std::string var;
+  swoc::bwprint(var, "node_{}", var_idx++);
+  return std::move(var);
+}
+
+void Context::emit_min_items_check(std::string_view const& var, uintmax_t limit) {
+  src_out("if ({}.size <= {}) return erratum.error(\"Array at line {{}} has only {{}} items instead of the required {} items\", {}.Mark().line, {}.size());", var, limit, limit, var, var);
+}
+
 void Context::emit_required_check(YAML::Node const &node, std::string_view const& var) {
   src_out("// check for required tags\nfor ( auto && tag : {{ ");
   TextView delimiter;
@@ -315,7 +334,7 @@ void Context::emit_type_check(TypeSet const &types, std::string_view const &var)
 }
 
 // Process a 'type' node.
-Errata Context::prop_type(const YAML::Node &node, TypeSet & types) {
+Errata Context::process_type_value(const YAML::Node &node, TypeSet & types) {
   auto check = [&](YAML::Node const& node) {
     auto & name = node.Scalar();
     auto primitive = SchemaTypeName[name];
@@ -343,40 +362,145 @@ Errata Context::prop_type(const YAML::Node &node, TypeSet & types) {
 }
 
 Errata Context::validate_node(YAML::Node const &node, std::string_view const& var) {
-  if (node["$ref"]) {
-  } else if (node.IsMap()) {
+  if (node.IsMap()) {
+    if (node["$ref"]) {
+      auto n { node["$ref"] };
+      if (node.size() > 1) {
+        notes.warn("Ignoring tags in value at line {} - use of '$ref' tag at line {} requires ignoring all other tags.", node.Mark().line, n.Mark().line);
+      }
+      if (auto spot = definitions.find(n.Scalar()) ; spot != definitions.end()) {
+        src_out("if (! definition::{}(erratum, {}).is_ok()) return notes;\n", spot->second, var);
+      } else {
+        notes.error("Invalid '$ref' at line {} in value at line {} - '{}' not found.",
+                    n.Mark().line, node.Mark().line, n.Scalar());
+      }
+      return notes;
+    }
     TypeSet types;
     if (node["type"]) {
-      prop_type(node["type"], types);
-      if (!notes.is_ok()) return notes;
+      process_type_value(node["type"], types);
+      if (notes.severity() >= Severity::ERROR) return notes;
       emit_type_check(types, var);
     }
 
+    bool single_type_p = types.count() == 1;
+
     if (types[int(SchemaType::OBJECT)]) { // could be an object.
       bool has_tags_p = std::any_of(ObjectTagName.begin(), ObjectTagName.end(), [&](decltype(ObjectTagName)::Pair const& pair) -> bool { return node[std::get<1>(pair)]; });
-      bool only_object_p = types.count() == 1;
-      if (!only_object_p && has_tags_p) {
-        src_out("if (node.IsMap()) {{\n");
+      if (!single_type_p && has_tags_p) {
+        src_out("if ({}.{}()) {{\n", var, SchemaTypeCheck[SchemaType::OBJECT]);
         indent_src();
       }
       if (node[ObjectTagName[ObjectTag::REQUIRED]]) {
         auto required_node = node[ObjectTagName[ObjectTag::REQUIRED]];
         if (!required_node.IsSequence()) {
-          return notes.error("'required' value at line {} is not an array.", required_node.Mark().line);
+          return notes.error("'{}' value at line {} is not type {}.", ObjectTagName[ObjectTag::REQUIRED], required_node.Mark().line, SchemaTypeName[SchemaType::ARRAY]);
         }
         emit_required_check(required_node, var);
       }
-      if (!only_object_p && has_tags_p) {
+      if (node[ObjectTagName[ObjectTag::PROPERTIES]]) {
+        auto n_1 = node[ObjectTagName[ObjectTag::PROPERTIES]];
+        if (!n_1.IsMap()) {
+          return notes.error("'{}' value at line {} is not type {}.",
+                             ObjectTagName[ObjectTag::PROPERTIES], n_1.Mark().line,
+                             SchemaTypeName[SchemaType::OBJECT]);
+        }
+        auto nvar = this->var_name();
+        for ( auto && pair : n_1 ) {
+          src_out("if ({}[\"{}\"]) {{\n", var, pair.first.Scalar());
+          indent_src();
+          src_out("auto {} = {}[\"{}\"];\n", nvar, var, pair.first.Scalar());
+          this->validate_node(pair.second, nvar);
+          exdent_src();
+          src_out("}}\n");
+        }
+      }
+      if (!single_type_p && has_tags_p) {
         exdent_src();
         src_out("}}\n");
       }
     }
+
+    if (types[int(SchemaType::ARRAY)]) { // could be an array
+      unsigned min_items(0), max_items(std::numeric_limits<unsigned>::max());
+
+      bool has_tags_p = std::any_of(ObjectTagName.begin(), ObjectTagName.end(),
+                                    [&](decltype(ObjectTagName)::Pair const &pair) -> bool {
+                                      return node[std::get<1>(pair)];
+                                    });
+      if (!single_type_p && has_tags_p) {
+        src_out("if ({}.{}()) {{\n", var, SchemaTypeCheck[SchemaType::ARRAY]);
+        indent_src();
+      }
+
+      if (node[ArrayTagName[ArrayTag::MIN_ITEMS]]) {
+        auto n_1 = node[ArrayTagName[ArrayTag::MIN_ITEMS]];
+        TextView value = TextView{n_1.Scalar()}.trim_if(&isspace);
+        TextView parsed;
+        auto x = swoc::svtoi(value, &parsed);
+        if (parsed.size() != value.size()) {
+          return notes.error(
+              "{} value '{}' at line {} for type {} at line {} is invalid - it must be a positive integer.",
+              ArrayTagName[ArrayTag::MIN_ITEMS], value, n_1.Mark().line, SchemaTypeName[SchemaType::ARRAY], node.Mark().line);
+        }
+        emit_min_items_check(var, x);
+      }
+
+      if (node[ArrayTagName[ArrayTag::ITEMS]]) {
+        auto n_1 = node[ArrayTagName[ArrayTag::ITEMS]];
+        if (n_1.IsMap()) {
+          auto nvar = var_name();
+          src_out("for ( auto && {} : {} ) {{\n", nvar, var);
+          indent_src();
+          validate_node(n_1, nvar);
+          exdent_src();
+        } else if (n_1.IsSequence()) {
+          auto nvar = var_name();
+          auto limit = n_1.size();
+          if (limit >= max_items) {
+            notes.warn("Type '{}' at line {} has schemas for {} items (line {}) but can have at most {} items (line {}). Extra schemas ignored."
+                , SchemaTypeName[SchemaType::ARRAY], node.Mark().line, limit, n_1.Mark().line, max_items, node[ArrayTagName[ArrayTag::MAX_ITEMS]].Mark().line);
+            limit = max_items;
+          }
+          if (limit <= min_items) {
+            for (int idx = 0; idx < n_1.size(); ++idx) {
+              src_out("{} = {}[{}];\n", nvar, var, idx);
+              this->validate_node(n_1[idx], nvar);
+            }
+          } else {
+            src_out("switch ({}.size()) {{\n", var);
+            indent_src();
+            for (int idx = 0; idx < n_1.size(); ++idx) {
+              src_out("case {}: {{\n");
+              indent_src();
+              src_out("auto {} = {}[{}];\n", nvar, var, idx);
+              this->validate_node(n_1[idx], nvar);
+              src_out("}}\n");
+              exdent_src();
+            }
+            exdent_src();
+            src_out("}}\n");
+          }
+        } else {
+          return notes.error("Invalid value for '{}' at line {}: must be a {} or {}.", ArrayTagName[ArrayTag::ITEMS], n_1.Mark().line, SchemaTypeName[SchemaType::ARRAY], SchemaTypeName[SchemaType::OBJECT]);
+        }
+      }
+
+      if (!single_type_p && has_tags_p) {
+        exdent_src();
+        src_out("}}\n");
+      }
+    }
+
+  } else {
+    notes.error("Value at line {} must be a {}.", node.Mark().line, SchemaTypeName[SchemaType::OBJECT]);
   }
   return notes;
 }
 
 Errata Context::generate_define(YAML::Node const& key, YAML::Node const& value) {
-  std::string name = key.Scalar();
+  std::string name = "v_"; // prefix to avoid reserved word issues.
+  name += key.Scalar();
   std::transform(name.begin(), name.end(), name.begin(), [](char c) { return isalnum(c) ? c : '_'; });
   definitions[DEFINITION_PREFIX + key.Scalar()] = name;
   hdr_out("bool {} (swoc::Errata erratum, YAML::Node const& node);\n", name);
@@ -389,18 +513,18 @@ Errata Context::generate_define(YAML::Node const& key, YAML::Node const& value) 
   return notes;
 }
 
-Errata process_definitions(Context& ctx, YAML::Node const& node) {
+Errata Context::process_definitions(YAML::Node const& node) {
   if (! node.IsMap()) {
-    return ctx.notes.error("'definitions' node is not a map");
+    return notes.error("'definitions' node is not a map");
   }
-  ctx.hdr_out("struct definition {{\n");
-  ctx.indent_hdr();
+  hdr_out("struct definition {{\n");
+  indent_hdr();
   for ( auto && pair: node ) {
-    ctx.generate_define(pair.first, pair.second);
+    generate_define(pair.first, pair.second);
   }
-  ctx.exdent_hdr();
-  ctx.hdr_out("}};\n");
-  return ctx.notes;
+  exdent_hdr();
+  hdr_out("}};\n");
+  return notes;
 }
 
 Errata process(int argc, char *argv[]) {
@@ -467,11 +591,14 @@ Errata process(int argc, char *argv[]) {
 
 
   if (root["definitions"]) {
-    process_definitions(ctx, root["definitions"]);
+    ctx.process_definitions(root["definitions"]);
   }
   return ctx.notes;
 }
 
 int main(int argc, char * argv[]) {
   auto result = process(argc, argv);
+  for ( auto && note : result ) {
+    std::cout << note.text() << std::endl;
+  }
 }
