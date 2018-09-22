@@ -28,3 +28,6 @@ add_executable(canner
 add_dependencies(canner LibSWOC YAML_CPP)
 target_link_libraries(canner ${CMAKE_HOME_DIRECTORY}/lib/libyaml-cpp.a ${CMAKE_HOME_DIRECTORY}/lib/libswoc++.a ${POSIX_THREAD_LIB})
 
+add_custom_target(clang-format-src COMMAND ${CMAKE_HOME_DIRECTORY}/tools/clang-format.sh ${CMAKE_HOME_DIRECTORY}/src)
+add_custom_target(clang-format)
+add_dependencies(clang-format clang-format-src)

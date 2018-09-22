@@ -1,13 +1,15 @@
 #include "yaml-cpp/yaml.h"
 
-bool equal(const YAML::Node & lhs, const YAML::Node & rhs) {
+bool
+equal(const YAML::Node &lhs, const YAML::Node &rhs)
+{
   bool zret = false;
   if (lhs.Type() == rhs.Type()) {
     if (lhs.IsSequence()) {
       if (lhs.size() != rhs.size()) {
         return false;
       }
-      for ( int i = 0 , n = lhs.size() ; i < n ; ++i ) {
+      for (int i = 0, n = lhs.size(); i < n; ++i) {
         if (!equal(lhs[i], rhs[i])) {
           return false;
         }
@@ -17,8 +19,8 @@ bool equal(const YAML::Node & lhs, const YAML::Node & rhs) {
       if (lhs.size() != rhs.size()) {
         return false;
       }
-      for ( const auto & pair : lhs) {
-        auto key = pair.first;
+      for (const auto &pair : lhs) {
+        auto key   = pair.first;
         auto value = pair.second;
         if (!rhs[key] || !equal(value, rhs[key])) {
           return false;
