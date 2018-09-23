@@ -49,7 +49,7 @@ std::array<option, 4> Options = {
 static const std::string DEFINITION_PREFIX{"#/definitions/"};
 
 /// JSON Schema types.
-enum class SchemaType { NIL, BOOL, OBJECT, ARRAY, NUMBER, STRING, INVALID };
+enum class SchemaType { NIL, BOOL, OBJECT, ARRAY, NUMBER, INTEGER, STRING, INVALID };
 
 using TypeSet = std::bitset<static_cast<size_t>(SchemaType::INVALID)>;
 
@@ -61,6 +61,7 @@ swoc::Lexicon<SchemaType> SchemaTypeLexicon{{
   {SchemaType::OBJECT, "object"},
   {SchemaType::ARRAY, "array"},
   {SchemaType::NUMBER, "number"},
+  {SchemaType::INTEGER, "integer"},
   {SchemaType::STRING, "string"},
 }};
 
@@ -70,6 +71,7 @@ std::map<SchemaType, std::string> SchemaTypeCheck{{
   {SchemaType::OBJECT, "is_object_type"},
   {SchemaType::ARRAY, "is_array_type"},
   {SchemaType::NUMBER, "is_number_type"},
+  {SchemaType::INTEGER, "is_integer_type"},
   {SchemaType::STRING, "is_string_type"},
 }};
 
@@ -82,6 +84,7 @@ enum class Property {
   MAX_ITEMS,
   ONE_OF,
   ANY_OF,
+  ENUM,
   INVALID,
   // For looping over properties.
   BEGIN = PROPERTIES,
@@ -90,20 +93,21 @@ enum class Property {
 
 using PropertySet = std::bitset<int(Property::INVALID) + 1>;
 
-swoc::Lexicon<Property> PropName{{{Property::PROPERTIES, "properties"},
+swoc::Lexicon<Property> PropName{{Property::PROPERTIES, "properties"},
                                   {Property::REQUIRED, "required"},
                                   {Property::ITEMS, "items"},
                                   {Property::MIN_ITEMS, "minItems"},
                                   {Property::MAX_ITEMS, "maxItems"},
                                   {Property::ONE_OF, "oneOf"},
-                                  {Property::ANY_OF, "anyOf"}}};
+                                  {Property::ANY_OF, "anyOf"},
+                                  {Property::ENUM, "enum"}};
 
 std::array<std::string_view, 2> ObjectPropNames = {{PropName[Property::PROPERTIES], PropName[Property::REQUIRED]}};
 std::array<std::string_view, 3> ArrayPropNames  = {
   {PropName[Property::ITEMS], PropName[Property::MIN_ITEMS], PropName[Property::MAX_ITEMS]}};
 
 // File scope initialization.
-[[maybe_unused]] static bool INITIALIZED = (
+[[maybe_unused]] bool INITIALIZED = (
 
   SchemaTypeLexicon.set_default(SchemaType::INVALID).set_default("INVALID"),
   PropName.set_default(Property ::INVALID).set_default("INVALID"),
@@ -204,8 +208,11 @@ struct Context {
 
   // property checks
   Errata process_type_value(const YAML::Node &node, TypeSet &types);
-  Errata process_any_of_value(YAML::Node const& node);
-  Errata process one_of_value(YAML::Node const& node);
+  Errata process_object_value(YAML::Node const &node, std::string_view const &var, TypeSet const &types);
+  Errata process_array_value(YAML::Node const &node, std::string_view const &var, TypeSet const &types);
+  Errata process_any_of_value(YAML::Node const &node, std::string_view const &var);
+  Errata process_one_of_value(YAML::Node const &node, std::string_view const &var);
+  Errata process_enum_value(YAML::Node const &node, std::string_view const &var);
 
   // code generation
   void emit_required_check(YAML::Node const &node, std::string_view const &var);
@@ -350,7 +357,7 @@ Context::emit_type_check(TypeSet const &types, std::string_view const &var)
   if (types.count() == 1) {
     auto &&[value, name] = *std::find_if(SchemaTypeLexicon.begin(), SchemaTypeLexicon.end(),
                                          [&](auto &&v) -> bool { return types[int(std::get<0>(v))]; });
-    src_out("{}({})) {{ erratum.error(\"value at line {{}} was not '{}'\", "
+    src_out("{}({})) {{ erratum.error(\"'{{}}' value at line {{}} was not {}\", name, "
             "{}.Mark().line); return false; }}\n",
             SchemaTypeCheck[value], var, name, var);
   } else {
@@ -407,6 +414,264 @@ Context::process_type_value(const YAML::Node &node, TypeSet &types)
 }
 
 Errata
+Context::process_any_of_value(YAML::Node const &node, std::string_view const &var)
+{
+  if (!node.IsSequence()) {
+    return notes.error("'{}' value at line {} is invalid - it must be {} type.", node.Mark().line,
+                       SchemaTypeLexicon[SchemaType::ARRAY]);
+  } else if (node.size() < 1) {
+    notes.warn("'{}' value at line {} has no items - ignored.", PropName[Property::ANY_OF], node.Mark().line);
+  } else {
+    auto nvar = var_name();
+    std::string_view comma;
+    src_out("// {}\nswoc::Errata any_of_err;\nstd::array<Validator, {}> "
+            "any_of_verify = {{\n",
+            PropName[Property::ANY_OF], node.size());
+    indent_src();
+    for (auto &&schema : node) {
+      src_out("[&erratum = any_of_err, name, this] (YAML::Node const& node) -> bool {{\n");
+      indent_src();
+      validate_node(schema, "node");
+      src_out("return true;\n");
+      exdent_src();
+      src_out("}},\n");
+    }
+    exdent_src();
+    src_out("}};\n");
+    src_out("if (! std::any_of(any_of_verify.begin(), any_of_verify.end(), "
+            "[&] (Validator const& vf) {{ return vf({}); }})) {{\n",
+            var);
+    indent_src();
+    src_out("erratum.note(any_of_err);\nerratum.error(\"Node at line {{}} was "
+            "not valid for any of these schemas.\", "
+            "{}.Mark().line);\nreturn false;\n",
+            var);
+    exdent_src();
+    src_out("}}\n");
+  }
+  return notes;
+}
+
+Errata
+Context::process_one_of_value(YAML::Node const &node, std::string_view const &var)
+{
+  if (!node.IsSequence()) {
+    return notes.error("'{}' value at line {} is invalid - it must be {} type.", node.Mark().line,
+                       SchemaTypeLexicon[SchemaType::ARRAY]);
+  } else if (node.size() < 1) {
+    notes.warn("'{}' value at line {} has no items - ignored.", PropName[Property::ONE_OF], node.Mark().line);
+  } else {
+    auto nvar = var_name();
+    src_out("// {}\nswoc::Errata one_of_err;\nstd::array<Validator, {}> "
+            "one_of_verify = {{\n",
+            PropName[Property::ONE_OF], node.size());
+    indent_src();
+    for (auto &&schema : node) {
+      src_out("[&erratum = one_of_err, name, this] (YAML::Node const& node) -> bool {{\n");
+      indent_src();
+      validate_node(schema, "node");
+      src_out("return true;\n");
+      exdent_src();
+      src_out("}},\n");
+    }
+    exdent_src();
+    src_out("}};\n");
+    src_out("unsigned one_of_count = 0;\nfor ( auto && vf : one_of_verify "
+            ") {{\n");
+    indent_src();
+    src_out("if (vf({}) && ++one_of_count > 1) {{\n", var);
+    indent_src();
+    src_out("erratum.error(\"Node at line {{}} was valid for more than one "
+            "schema.\", {}.Mark().line);\nreturn false;\n",
+            var);
+    exdent_src();
+    src_out("}}\n");
+    exdent_src();
+    src_out("}}\n");
+    src_out("if (one_of_count != 1) {{\n");
+    indent_src();
+    src_out("erratum.note(one_of_err);\nerratum.error(\"Node at line {{}} "
+            "was not valid for any of these schemas.\", "
+            "{}.Mark().line);\nreturn false;\n",
+            var);
+    exdent_src();
+    src_out("}}\n");
+  }
+  return notes;
+}
+
+Errata
+Context::process_enum_value(YAML::Node const &node, std::string_view const &var) {
+  if (!node.IsSequence()) {
+    return notes.error("'{}' value at line {} is invalid - it must be {} type.", node.Mark().line,
+                       SchemaTypeLexicon[SchemaType::ARRAY]);
+  } else if (node.size() < 1) {
+    notes.warn("'{}' value at line {} has no items - ignored.", PropName[Property::ENUM], node.Mark().line);
+  } else {
+    std::string usage;
+    static const std::string separator { ", " };
+    src_out("bool enum_match_p = false;\nfor ( auto && vn : {{ ");
+    for ( auto && n : node ) {
+      YAML::Emitter e;
+      e << n;
+      src_out("YAML::Load(R\"uthira({})uthira\"), ", e.c_str());
+      usage += e.c_str() + separator;
+    }
+    usage.resize(usage.size()-2);
+    src_out(" }} ) {{\n");
+    indent_src();
+    src_out("if ( equal(vn, {}) ) {{\n", var);
+    indent_src();
+    src_out("enum_match_p = true;\nbreak;\n");
+    exdent_src();
+    src_out("}}\n");
+    exdent_src();
+    src_out("}}\n");
+    src_out("if (!enum_match_p) {{\n");
+    indent_src();
+    src_out("YAML::Emitter yem;\nyem << {};\nerratum.error(\"'{{}}' value '{{}}' at line {{}} is invalid - it must be one of {{}}.\""
+            ", name, yem.c_str(), {}.Mark().line, R\"uthira({})uthira\");\nreturn false;\n", var, var, usage);
+    exdent_src();
+    src_out("}}\n");
+  }
+  return notes;
+}
+
+Errata
+Context::process_array_value(YAML::Node const &node, std::string_view const &var, TypeSet const &types)
+{
+  unsigned min_items(0), max_items(std::numeric_limits<unsigned>::max());
+
+  bool single_type_p = types.count() == 1;
+  bool has_tags_p =
+    std::any_of(ArrayPropNames.begin(), ArrayPropNames.end(), [&](std::string_view const &name) -> bool { return node[name]; });
+
+  if (!single_type_p && has_tags_p) {
+    src_out("if ({}.{}()) {{\n", var, SchemaTypeCheck[SchemaType::ARRAY]);
+    indent_src();
+  }
+
+  if (node[PropName[Property::MIN_ITEMS]]) {
+    auto n_1       = node[PropName[Property::MIN_ITEMS]];
+    TextView value = TextView{n_1.Scalar()}.trim_if(&isspace);
+    TextView parsed;
+    auto x = swoc::svtoi(value, &parsed);
+    if (parsed.size() != value.size()) {
+      return notes.error("{} value '{}' at line {} for type {} at line {} is invalid - it "
+                         "must be a positive integer.",
+                         PropName[Property::MIN_ITEMS], value, n_1.Mark().line, SchemaTypeLexicon[SchemaType::ARRAY],
+                         node.Mark().line);
+    }
+    emit_min_items_check(var, x);
+  }
+
+  if (node[PropName[Property::MAX_ITEMS]]) {
+    auto n_1       = node[PropName[Property::MAX_ITEMS]];
+    TextView value = TextView{n_1.Scalar()}.trim_if(&isspace);
+    TextView parsed;
+    auto x = swoc::svtoi(value, &parsed);
+    if (parsed.size() != value.size()) {
+      return notes.error("{} value '{}' at line {} for type {} at line {} is invalid - it "
+                         "must be a positive integer.",
+                         PropName[Property::MAX_ITEMS], value, n_1.Mark().line, SchemaTypeLexicon[SchemaType::ARRAY],
+                         node.Mark().line);
+    }
+    emit_max_items_check(var, x);
+  }
+
+  if (node[PropName[Property::ITEMS]]) {
+    auto n_1 = node[PropName[Property::ITEMS]];
+    if (n_1.IsMap()) {
+      auto nvar = var_name();
+      src_out("for ( auto && {} : {} ) {{\n", nvar, var);
+      indent_src();
+      validate_node(n_1, nvar);
+      exdent_src();
+      src_out("}}\n");
+    } else if (n_1.IsSequence()) {
+      auto nvar  = var_name();
+      auto limit = n_1.size();
+      if (limit >= max_items) {
+        notes.warn("Type '{}' at line {} has schemas for {} items (line {}) but "
+                   "can have at most {} items (line {}). Extra schemas ignored.",
+                   SchemaTypeLexicon[SchemaType::ARRAY], node.Mark().line, limit, n_1.Mark().line, max_items,
+                   node[PropName[Property::MAX_ITEMS]].Mark().line);
+        limit = max_items;
+      }
+      if (limit <= min_items) {
+        for (int idx = 0; idx < n_1.size(); ++idx) {
+          src_out("{} = {}[{}];\n", nvar, var, idx);
+          this->validate_node(n_1[idx], nvar);
+        }
+      } else {
+        src_out("switch ({}.size()) {{\n", var);
+        indent_src();
+        for (int idx = 0; idx < n_1.size(); ++idx) {
+          src_out("case {}: {{\n");
+          indent_src();
+          src_out("auto {} = {}[{}];\n", nvar, var, idx);
+          this->validate_node(n_1[idx], nvar);
+          src_out("}}\n");
+          exdent_src();
+        }
+        exdent_src();
+        src_out("}}\n");
+      }
+    } else {
+      return notes.error("Invalid value for '{}' at line {}: must be a {} or {}.", PropName[Property::ITEMS], n_1.Mark().line,
+                         SchemaTypeLexicon[SchemaType::ARRAY], SchemaTypeLexicon[SchemaType::OBJECT]);
+    }
+  }
+
+  if (!single_type_p && has_tags_p) {
+    exdent_src();
+    src_out("}}\n");
+  }
+
+  return notes;
+}
+
+Errata
+Context::process_object_value(YAML::Node const &node, std::string_view const &var, TypeSet const &types) {
+  bool single_type_p = types.count() == 1;
+  bool has_tags_p = std::any_of(ObjectPropNames.begin(), ObjectPropNames.end(),
+                                [&](std::string_view const &name) -> bool { return node[name]; });
+  if (!single_type_p && has_tags_p) {
+    src_out("if ({}.{}()) {{\n", var, SchemaTypeCheck[SchemaType::OBJECT]);
+    indent_src();
+  }
+  if (node[PropName[Property::REQUIRED]]) {
+    auto required_node = node[PropName[Property::REQUIRED]];
+    if (!required_node.IsSequence()) {
+      return notes.error("'{}' value at line {} is not type {}.", PropName[Property::REQUIRED], required_node.Mark().line,
+                         SchemaTypeLexicon[SchemaType::ARRAY]);
+    }
+    emit_required_check(required_node, var);
+  }
+  if (node[PropName[Property::PROPERTIES]]) {
+    auto n_1 = node[PropName[Property::PROPERTIES]];
+    if (!n_1.IsMap()) {
+      return notes.error("'{}' value at line {} is not type {}.", PropName[Property::PROPERTIES], n_1.Mark().line,
+                         SchemaTypeLexicon[SchemaType::OBJECT]);
+    }
+    auto nvar = this->var_name();
+    for (auto &&pair : n_1) {
+      src_out("if ({}[\"{}\"]) {{\n", var, pair.first.Scalar());
+      indent_src();
+      src_out("auto {} = {}[\"{}\"];\n", nvar, var, pair.first.Scalar());
+      this->validate_node(pair.second, nvar);
+      exdent_src();
+      src_out("}}\n");
+    }
+  }
+  if (!single_type_p && has_tags_p) {
+    exdent_src();
+    src_out("}}\n");
+  }
+  return notes;
+}
+
+Errata
 Context::validate_node(YAML::Node const &node, std::string_view const &var)
 {
   if (node.IsMap()) {
@@ -418,227 +683,51 @@ Context::validate_node(YAML::Node const &node, std::string_view const &var)
                    node.Mark().line, n.Mark().line);
       }
       if (auto spot = definitions.find(n.Scalar()); spot != definitions.end()) {
-        src_out("if (! definition::{}(erratum, {}).is_ok()) return false;\n", spot->second, var);
+        src_out("if (! defun.{}(erratum, {}, name)) return false;\n", spot->second, var);
       } else {
         notes.error("Invalid '$ref' at line {} in value at line {} - '{}' not found.", n.Mark().line, node.Mark().line, n.Scalar());
       }
       return notes;
     }
+
     TypeSet types;
     if (node["type"]) {
       process_type_value(node["type"], types);
       if (notes.severity() >= Severity::ERROR)
         return notes;
       emit_type_check(types, var);
+    } else {
+      types.set();
     }
 
-    bool single_type_p = types.count() == 1;
 
     if (types[int(SchemaType::OBJECT)]) { // could be an object.
-      bool has_tags_p = std::any_of(ObjectPropNames.begin(), ObjectPropNames.end(),
-                                    [&](std::string_view const &name) -> bool { return node[name]; });
-      if (!single_type_p && has_tags_p) {
-        src_out("if ({}.{}()) {{\n", var, SchemaTypeCheck[SchemaType::OBJECT]);
-        indent_src();
-      }
-      if (node[PropName[Property::REQUIRED]]) {
-        auto required_node = node[PropName[Property::REQUIRED]];
-        if (!required_node.IsSequence()) {
-          return notes.error("'{}' value at line {} is not type {}.", PropName[Property::REQUIRED], required_node.Mark().line,
-                             SchemaTypeLexicon[SchemaType::ARRAY]);
-        }
-        emit_required_check(required_node, var);
-      }
-      if (node[PropName[Property::PROPERTIES]]) {
-        auto n_1 = node[PropName[Property::PROPERTIES]];
-        if (!n_1.IsMap()) {
-          return notes.error("'{}' value at line {} is not type {}.", PropName[Property::PROPERTIES], n_1.Mark().line,
-                             SchemaTypeLexicon[SchemaType::OBJECT]);
-        }
-        auto nvar = this->var_name();
-        for (auto &&pair : n_1) {
-          src_out("if ({}[\"{}\"]) {{\n", var, pair.first.Scalar());
-          indent_src();
-          src_out("auto {} = {}[\"{}\"];\n", nvar, var, pair.first.Scalar());
-          this->validate_node(pair.second, nvar);
-          exdent_src();
-          src_out("}}\n");
-        }
-      }
-      if (!single_type_p && has_tags_p) {
-        exdent_src();
-        src_out("}}\n");
+      if (process_object_value(node, var, types).severity() >= Severity::ERROR) {
+        return notes;
       }
     }
 
     if (types[int(SchemaType::ARRAY)]) { // could be an array
-      unsigned min_items(0), max_items(std::numeric_limits<unsigned>::max());
-
-      bool has_tags_p =
-        std::any_of(ArrayPropNames.begin(), ArrayPropNames.end(), [&](std::string_view const &name) -> bool { return node[name]; });
-      if (!single_type_p && has_tags_p) {
-        src_out("if ({}.{}()) {{\n", var, SchemaTypeCheck[SchemaType::ARRAY]);
-        indent_src();
-      }
-
-      if (node[PropName[Property::MIN_ITEMS]]) {
-        auto n_1       = node[PropName[Property::MIN_ITEMS]];
-        TextView value = TextView{n_1.Scalar()}.trim_if(&isspace);
-        TextView parsed;
-        auto x = swoc::svtoi(value, &parsed);
-        if (parsed.size() != value.size()) {
-          return notes.error("{} value '{}' at line {} for type {} at line {} is invalid - it "
-                             "must be a positive integer.",
-                             PropName[Property::MIN_ITEMS], value, n_1.Mark().line, SchemaTypeLexicon[SchemaType::ARRAY],
-                             node.Mark().line);
-        }
-        emit_min_items_check(var, x);
-      }
-
-      if (node[PropName[Property::MAX_ITEMS]]) {
-        auto n_1       = node[PropName[Property::MAX_ITEMS]];
-        TextView value = TextView{n_1.Scalar()}.trim_if(&isspace);
-        TextView parsed;
-        auto x = swoc::svtoi(value, &parsed);
-        if (parsed.size() != value.size()) {
-          return notes.error("{} value '{}' at line {} for type {} at line {} is invalid - it "
-                             "must be a positive integer.",
-                             PropName[Property::MAX_ITEMS], value, n_1.Mark().line, SchemaTypeLexicon[SchemaType::ARRAY],
-                             node.Mark().line);
-        }
-        emit_max_items_check(var, x);
-      }
-
-      if (node[PropName[Property::ITEMS]]) {
-        auto n_1 = node[PropName[Property::ITEMS]];
-        if (n_1.IsMap()) {
-          auto nvar = var_name();
-          src_out("for ( auto && {} : {} ) {{\n", nvar, var);
-          indent_src();
-          validate_node(n_1, nvar);
-          exdent_src();
-          src_out("}}\n");
-        } else if (n_1.IsSequence()) {
-          auto nvar  = var_name();
-          auto limit = n_1.size();
-          if (limit >= max_items) {
-            notes.warn("Type '{}' at line {} has schemas for {} items (line {}) but "
-                       "can have at most {} items (line {}). Extra schemas ignored.",
-                       SchemaTypeLexicon[SchemaType::ARRAY], node.Mark().line, limit, n_1.Mark().line, max_items,
-                       node[PropName[Property::MAX_ITEMS]].Mark().line);
-            limit = max_items;
-          }
-          if (limit <= min_items) {
-            for (int idx = 0; idx < n_1.size(); ++idx) {
-              src_out("{} = {}[{}];\n", nvar, var, idx);
-              this->validate_node(n_1[idx], nvar);
-            }
-          } else {
-            src_out("switch ({}.size()) {{\n", var);
-            indent_src();
-            for (int idx = 0; idx < n_1.size(); ++idx) {
-              src_out("case {}: {{\n");
-              indent_src();
-              src_out("auto {} = {}[{}];\n", nvar, var, idx);
-              this->validate_node(n_1[idx], nvar);
-              src_out("}}\n");
-              exdent_src();
-            }
-            exdent_src();
-            src_out("}}\n");
-          }
-        } else {
-          return notes.error("Invalid value for '{}' at line {}: must be a {} or {}.", PropName[Property::ITEMS], n_1.Mark().line,
-                             SchemaTypeLexicon[SchemaType::ARRAY], SchemaTypeLexicon[SchemaType::OBJECT]);
-        }
-      }
-
-      if (!single_type_p && has_tags_p) {
-        exdent_src();
-        src_out("}}\n");
+      if (process_array_value(node, var, types).severity() >= Severity::ERROR) {
+        return notes;
       }
     }
 
     if (node[PropName[Property::ANY_OF]]) {
-      auto any_node = node[PropName[Property::ANY_OF]];
-      if (!any_node.IsSequence()) {
-        return notes.error("'{}' value at line {} is invalid - it must be {} type.", any_node.Mark().line,
-                           SchemaTypeLexicon[SchemaType::ARRAY]);
-      } else if (any_node.size() < 1) {
-        notes.warn("'{}' value at line {} has no items - ignored.", PropName[Property::ANY_OF], any_node.Mark().line);
-      } else {
-        auto nvar = var_name();
-        std::string_view comma;
-        src_out("// {}\nswoc::Errata any_of_err;\nstd::array<Validator, {}> "
-                "any_of_verify = {{\n",
-                PropName[Property::ANY_OF], any_node.size());
-        indent_src();
-        for (auto &&schema : any_node) {
-          src_out("[&erratum = any_of_err] (YAML::Node const& node) -> bool {{\n");
-          indent_src();
-          validate_node(schema, "node");
-          src_out("return true;\n");
-          exdent_src();
-          src_out("}},\n");
-        }
-        exdent_src();
-        src_out("}};\n");
-        src_out("if (! std::any_of(any_of_verify.begin(), any_of_verify.end(), "
-                "[&] (Validator const& vf) {{ return vf({}); }})) {{\n",
-                var);
-        indent_src();
-        src_out("erratum.note(any_err);\nerratum.error(\"Node at line {{}} was "
-                "not valid for any of these schemas.\", "
-                "{}.Mark().line);\nreturn false;\n",
-                var);
-        exdent_src();
-        src_out("}}\n");
+      if (process_any_of_value(node[PropName[Property::ANY_OF]], var).severity() >= Severity::ERROR) {
+        return notes;
       }
     }
 
     if (node[PropName[Property::ONE_OF]]) {
-      auto one_node = node[PropName[Property::ONE_OF]];
-      if (!one_node.IsSequence()) {
-        return notes.error("'{}' value at line {} is invalid - it must be {} type.", one_node.Mark().line,
-                           SchemaTypeLexicon[SchemaType::ARRAY]);
-      } else if (one_node.size() < 1) {
-        notes.warn("'{}' value at line {} has no items - ignored.", PropName[Property::ONE_OF], one_node.Mark().line);
-      } else {
-        auto nvar = var_name();
-        src_out("// {}\nswoc::Errata one_of_err;\nstd::array<Validator, {}> "
-                "one_of_verify = {{\n",
-                PropName[Property::ONE_OF], one_node.size());
-        indent_src();
-        for (auto &&schema : one_node) {
-          src_out("[&erratum = one_of_err] (YAML::Node const& node) -> bool {{\n");
-          indent_src();
-          validate_node(schema, "node");
-          src_out("return true;\n");
-          exdent_src();
-          src_out("}},\n");
-        }
-        exdent_src();
-        src_out("}};\n");
-        src_out("unsigned one_of_count = 0;\nfor ( auto && vf : one_of_verify "
-                ") {{\n");
-        indent_src();
-        src_out("if (vf({}) && ++one_of_count > 1) {{\n", var);
-        indent_src();
-        src_out("erratum.error(\"Node at line {} was valid for more than one "
-                "schema.\", {}.Mark().line);\nreturn false;\n",
-                var);
-        exdent_src();
-        src_out("}}\n");
-        exdent_src();
-        src_out("}}\n");
-        src_out("if (one_of_count != 1) {{\n");
-        indent_src();
-        src_out("erratum.note(one_of_err);\nerratum.error(\"Node at line {{}} "
-                "was not valid for any of these schema.\", "
-                "{}.Mark().line);\nreturn false;\n",
-                var);
-        exdent_src();
-        src_out("}}\n");
+      if (process_one_of_value(node[PropName[Property::ONE_OF]], var).severity() >= Severity::ERROR) {
+        return notes;
+      }
+    }
+
+    if (node[PropName[Property::ENUM]]) {
+      if (process_enum_value(node[PropName[Property::ENUM]], var).severity() >= Severity::ERROR) {
+        return notes;
       }
     }
 
@@ -651,15 +740,13 @@ Context::validate_node(YAML::Node const &node, std::string_view const &var)
 Errata
 Context::generate_define(YAML::Node const &key, YAML::Node const &value)
 {
-  std::string name = "v_"; // prefix to avoid reserved word issues.
-  name += key.Scalar();
-  std::transform(name.begin(), name.end(), name.begin(), [](char c) { return isalnum(c) ? c : '_'; });
-  definitions[DEFINITION_PREFIX + key.Scalar()] = name;
-  hdr_out("bool {} (swoc::Errata erratum, YAML::Node const& node);\n", name);
+  std::string defun = "v_"; // prefix to avoid reserved word issues.
+  defun += key.Scalar();
+  std::transform(defun.begin(), defun.end(), defun.begin(), [](char c) { return isalnum(c) ? c : '_'; });
+  definitions[DEFINITION_PREFIX + key.Scalar()] = defun;
+  hdr_out("bool {} (swoc::Errata &erratum, YAML::Node const& node, std::string_view const& name);\n", defun);
 
-  src_out("bool {}::definition::{} (swoc::Errata erratum, YAML::Node const& "
-          "node) {{\n",
-          class_name, name);
+  src_out("bool {}::Definitions::{} (swoc::Errata &erratum, YAML::Node const& node, std::string_view const& name) {{\n", class_name, defun);
   indent_src();
   validate_node(value, "node");
   src_out("return true;\n");
@@ -674,13 +761,14 @@ Context::process_definitions(YAML::Node const &node)
   if (!node.IsMap()) {
     return notes.error("'definitions' node is not a map");
   }
-  hdr_out("struct definition {{\n");
+  hdr_out("struct Definitions {{\n");
   indent_hdr();
   for (auto &&pair : node) {
     generate_define(pair.first, pair.second);
   }
+  hdr_out("\n{}::Definitions & defun {{ *this }};\n", class_name);
   exdent_hdr();
-  hdr_out("}};\n");
+  hdr_out("}} defun;\n", class_name);
   return notes;
 }
 
@@ -749,21 +837,107 @@ process(int argc, char *argv[])
   ctx.src_out("#include <functional>\n#include <array>\n#include "
               "<algorithm>\n#include <iostream>\n\n"
               "#include \"{}\"\n\n"
-              "using Validator = std::function<bool (const YAML::Node &)>;\n\n"
-              "extern bool equal(const YAML::Node &, const YAML::Node &);\n\n",
+              "using Validator = std::function<bool (YAML::Node const&)>;\n",
               ctx.hdr_path);
 
-  ctx.hdr_out("#include <string_view>\n#include \"yaml-cpp/yaml.h\"\n\n");
+  ctx.hdr_out("#include <string_view>\n\n#include \"swoc/Errata.h\"\n#include \"yaml-cpp/yaml.h\"\n\n");
   ctx.hdr_out("class {} {{\npublic:\n", ctx.class_name);
   ctx.indent_hdr();
+  ctx.hdr_out("swoc::Errata erratum;\n");
   ctx.hdr_out("bool operator()(const YAML::Node &n);\n\n", ctx.class_name);
-  for (auto &&[value, name] : SchemaTypeCheck) {
-    ctx.hdr_out("bool {}(swoc::Errata & erratum, YAML::Node const& node);\n");
+
+  ctx.src_file << (R"racecar(
+namespace {
+
+bool
+equal(const YAML::Node &lhs, const YAML::Node &rhs)
+{
+  if (lhs.Type() == rhs.Type()) {
+    if (lhs.IsSequence()) {
+      if (lhs.size() != rhs.size()) {
+        return false;
+      }
+      for (int i = 0, n = lhs.size(); i < n; ++i) {
+        if (!equal(lhs[i], rhs[i])) {
+          return false;
+        }
+        return true;
+      }
+    } else if (lhs.IsMap()) {
+      if (lhs.size() != rhs.size()) {
+        return false;
+      }
+      for (const auto &pair : lhs) {
+        auto key   = pair.first;
+        auto value = pair.second;
+        if (!rhs[key] || !equal(value, rhs[key])) {
+          return false;
+        }
+        return true;
+      }
+    } else {
+      return lhs.Scalar() == rhs.Scalar();
+    }
   }
+  return false;
+}
+
+bool is_null_type(YAML::Node const& node) {
+  return node.IsNull();
+}
+
+bool is_bool_type(YAML::Node const& node) {
+  if (node.IsScalar()) {
+    auto && value { node.Scalar() };
+    return 0 == strcasecmp("true", value) || 0 == strcasecmp("false", value);
+  }
+  return false;
+}
+
+bool is_array_type(YAML::Node const& node) {
+  return node.IsSequence();
+}
+
+bool is_object_type(YAML::Node const& node) {
+  return node.IsMap();
+}
+
+bool is_integer_type(YAML::Node const& node) {
+  if (node.IsScalar()) {
+    swoc::TextView value { node.Scalar() };
+    swoc::TextView parsed;
+    if (value.trim_if(&isspace).size() < 1) {
+      return false;
+    }
+    swoc::svtoi(value, &parsed);
+    return value.size() == parsed.size();
+  }
+  return false;
+}
+
+bool is_string_type(YAML::Node const& node) {
+  return node.IsScalar();
+}
+
+} // namespace
+
+)racecar");
 
   if (root["definitions"]) {
     ctx.process_definitions(root["definitions"]);
   }
+  ctx.exdent_hdr();
+  ctx.hdr_out("}};\n");
+
+  ctx.src_out("bool {}::operator()(YAML::Node const& node) {{\n", ctx.class_name);
+  ctx.indent_src();
+  ctx.src_out("static constexpr std::string_view name {{\"root\"}};\n");
+  ctx.src_out("erratum.clear();\n\n");
+  ctx.validate_node(root, "node");
+  ctx.src_out("\nreturn erratum.severity() < swoc::Severity::ERROR;\n");
+  ctx.exdent_src();
+  ctx.src_out("}}\n");
+
   return ctx.notes;
 }
 

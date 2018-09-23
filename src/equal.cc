@@ -3,7 +3,6 @@
 bool
 equal(const YAML::Node &lhs, const YAML::Node &rhs)
 {
-  bool zret = false;
   if (lhs.Type() == rhs.Type()) {
     if (lhs.IsSequence()) {
       if (lhs.size() != rhs.size()) {
@@ -31,5 +30,5 @@ equal(const YAML::Node &lhs, const YAML::Node &rhs)
       return lhs.Scalar() == rhs.Scalar();
     }
   }
-  return zret;
+  return false;
 }
