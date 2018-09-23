@@ -490,8 +490,8 @@ Context::process_one_of_value(YAML::Node const &node, std::string_view const &va
     src_out("}}\n");
     src_out("if (one_of_count != 1) {{\n");
     indent_src();
-    src_out("erratum.note(one_of_err);\nerratum.error(\"Node at line {{}} "
-            "was not valid for any of these schemas.\", "
+    src_out("erratum.note(one_of_err);\nerratum.error(\"'{{}}' value at line {{}} "
+            "was not valid for any of these schemas.\", name,"
             "{}.Mark().line);\nreturn false;\n",
             var);
     exdent_src();
