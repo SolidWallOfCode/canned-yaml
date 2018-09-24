@@ -43,18 +43,24 @@ using swoc::TextView;
 
 namespace
 {
+// Command line options.
 std::array<option, 4> Options = {
   {{"hdr", 1, nullptr, 'h'}, {"src", 1, nullptr, 's'}, {"class", 1, nullptr, 'c'}, {nullptr, 0, nullptr, 0}}};
 
+// URI prefix for access to the "definitions" section.
 static const std::string DEFINITION_PREFIX{"#/definitions/"};
 
 /// JSON Schema types.
 enum class SchemaType { NIL, BOOL, OBJECT, ARRAY, NUMBER, INTEGER, STRING, INVALID };
-
+/// Bit set to represent a set of JSON schema types.
 using TypeSet = std::bitset<static_cast<size_t>(SchemaType::INVALID)>;
 
+// Error message support - in many cases the list of valid types is needed for an error message,
+// so generate it once and store it here.
 std::string Valid_Type_List;
 
+// Conversion between schema types and string representations. These are the strings that would be
+// in the schema file.
 swoc::Lexicon<SchemaType> SchemaTypeLexicon{{
   {SchemaType::NIL, "null"},
   {SchemaType::BOOL, "boolean"},
@@ -65,6 +71,8 @@ swoc::Lexicon<SchemaType> SchemaTypeLexicon{{
   {SchemaType::STRING, "string"},
 }};
 
+// Type check functions. These are hand written and injected en masses in to the generated file.
+// This is used to map from a schema type (above) to the appropriate type check function.
 std::map<SchemaType, std::string> SchemaTypeCheck{{
   {SchemaType::NIL, "is_null_type"},
   {SchemaType::BOOL, "is_bool_type"},
@@ -75,7 +83,7 @@ std::map<SchemaType, std::string> SchemaTypeCheck{{
   {SchemaType::STRING, "is_string_type"},
 }};
 
-// Schema properties.
+// Supported properties in the schema. All properties should be listed here.
 enum class Property {
   PROPERTIES,
   REQUIRED,
@@ -91,22 +99,22 @@ enum class Property {
   END   = INVALID
 };
 
+// Bit set for set of properties.
 using PropertySet = std::bitset<int(Property::INVALID) + 1>;
 
-swoc::Lexicon<Property> PropName{{Property::PROPERTIES, "properties"},
-                                  {Property::REQUIRED, "required"},
-                                  {Property::ITEMS, "items"},
-                                  {Property::MIN_ITEMS, "minItems"},
-                                  {Property::MAX_ITEMS, "maxItems"},
-                                  {Property::ONE_OF, "oneOf"},
-                                  {Property::ANY_OF, "anyOf"},
-                                  {Property::ENUM, "enum"}};
+// Conversion between property type and the in schema string representation.
+swoc::Lexicon<Property> PropName{{Property::PROPERTIES, "properties"}, {Property::REQUIRED, "required"},
+                                 {Property::ITEMS, "items"},           {Property::MIN_ITEMS, "minItems"},
+                                 {Property::MAX_ITEMS, "maxItems"},    {Property::ONE_OF, "oneOf"},
+                                 {Property::ANY_OF, "anyOf"},          {Property::ENUM, "enum"}};
 
+// Lists of property names. There should be a list for each primary property, for which the list should
+// be those other properties that are valid only for the primary property.
 std::array<std::string_view, 2> ObjectPropNames = {{PropName[Property::PROPERTIES], PropName[Property::REQUIRED]}};
 std::array<std::string_view, 3> ArrayPropNames  = {
   {PropName[Property::ITEMS], PropName[Property::MIN_ITEMS], PropName[Property::MAX_ITEMS]}};
 
-// File scope initialization.
+// File scope initializations.
 [[maybe_unused]] bool INITIALIZED = (
 
   SchemaTypeLexicon.set_default(SchemaType::INVALID).set_default("INVALID"),
@@ -178,35 +186,42 @@ bwformat(BufferWriter &w, const bwf::Spec &spec, const file::path &path)
 }
 } // namespace swoc
 
-// Context carried between the various parsing steps.
+/// Context carried between the various parsing steps.
+/// This maintains the parsing state as the schema is generated.
 struct Context {
-  std::string hdr_path;
-  std::ofstream hdr_file;
-  std::string src_path;
-  std::ofstream src_file;
-  std::string class_name;
-  Errata notes;
+  std::string hdr_path;   ///< Path to the generated header file.
+  std::ofstream hdr_file; ///< File object for the generated header file.
+  std::string src_path;   ///< Path to the generated source file.
+  std::ofstream src_file; ///< File object for the generated source file.
+  std::string class_name; ///< Class name of the generated class.
+  Errata notes;           ///< Errors / notes encountered during parsing.
 
-  int src_indent{0};    // Indent level.
-  bool src_sol_p{true}; // Start of line
-  int hdr_indent{0};
-  bool hdr_sol_p{true};
+  int _src_indent{0};    ///< Indent level of the generated source file.
+  bool _src_sol_p{true}; ///< (at) start of line flag for generated source file.
+  int _hdr_indent{0};    ///< Indent level of the header file.
+  bool _hdr_sol_p{true}; /// (at) start of line flag for generated header file.
 
-  int var_idx{1}; ///< Index suffix for locally declared nodes.
+  /// Generated variable name index. This enables generating unique names whenever a local node
+  /// variable is required.
+  int var_idx{1};
+  /// Allocate a new variable name.
   std::string var_name();
 
-  void indent_src();
-  void exdent_src();
-  void indent_hdr();
-  void exdent_hdr();
+  void indent_src(); ///< Increase the indent level of the generated source file.
+  void exdent_src(); ///< Decrease the indent level of the generated source file.
+  void indent_hdr(); ///< Increase the indent level of the generated header file.
+  void exdent_hdr(); ///< Decrease the indent level of the generated header file.
 
   // Working methods.
+  /// Process the top level "definitions" value.
   Errata process_definitions(YAML::Node const &node);
+  /// Generate the validation functions for the "definitions".
   Errata generate_define(YAML::Node const &key, YAML::Node const &value);
-  // Base node validation - handles top level tags and dispatches as needed.
+  /// Generate validation logic for a specific node.
   Errata validate_node(YAML::Node const &node, std::string_view const &var);
 
-  // property checks
+  /// Process properties. Each function process the value for a specific property and is responsible
+  /// for generating the appropriate code or dispatching the appropriate "emit_..." functions.
   Errata process_type_value(const YAML::Node &node, TypeSet &types);
   Errata process_object_value(YAML::Node const &node, std::string_view const &var, TypeSet const &types);
   Errata process_array_value(YAML::Node const &node, std::string_view const &var, TypeSet const &types);
@@ -214,19 +229,23 @@ struct Context {
   Errata process_one_of_value(YAML::Node const &node, std::string_view const &var);
   Errata process_enum_value(YAML::Node const &node, std::string_view const &var);
 
-  // code generation
-  void emit_required_check(YAML::Node const &node, std::string_view const &var);
+  /// Direct code generation. Each "emit_..." function emits validation code for a specific property.
   void emit_type_check(TypeSet const &types, std::string_view const &var);
+  void emit_required_check(YAML::Node const &node, std::string_view const &var);
   void emit_min_items_check(std::string_view const &var, uintmax_t limit);
   void emit_max_items_check(std::string_view const &var, uintmax_t limit);
 
-  // output
+  /// Output. These functions send text to the generated source and header files respectively.
+  /// Internally the text is checked for new lines and the approrpriate indentation is applied.
   template <typename... Args> void src_out(std::string_view fmt, Args &&... args);
-
   template <typename... Args> void hdr_out(std::string_view fmt, Args &&... args);
 
+  /// Internal output functions which does the real work. @c src_out and @c hdr_out are responsible
+  /// for passing the appropriate arguments to this method to send the output to the right place.
   void out(std::ofstream &s, TextView text, bool &sol_p, int indent);
 
+  /// Map of local definition URIs. When a '$ref' is found, this table is consulted to find the
+  /// correct validation function to invoke.
   using Definitions = std::unordered_map<std::string, std::string>;
   Definitions definitions;
 };
@@ -234,22 +253,22 @@ struct Context {
 void
 Context::exdent_hdr()
 {
-  --hdr_indent;
+  --_hdr_indent;
 }
 void
 Context::exdent_src()
 {
-  --src_indent;
+  --_src_indent;
 }
 void
 Context::indent_hdr()
 {
-  ++hdr_indent;
+  ++_hdr_indent;
 }
 void
 Context::indent_src()
 {
-  ++src_indent;
+  ++_src_indent;
 }
 
 template <typename... Args>
@@ -258,7 +277,7 @@ Context::src_out(std::string_view fmt, Args &&... args)
 {
   static std::string tmp; // static makes for better memory reuse.
   swoc::bwprintv(tmp, fmt, std::forward_as_tuple(args...));
-  this->out(src_file, tmp, src_sol_p, src_indent);
+  this->out(src_file, tmp, _src_sol_p, _src_indent);
 }
 
 template <typename... Args>
@@ -267,7 +286,7 @@ Context::hdr_out(std::string_view fmt, Args &&... args)
 {
   static std::string tmp; // static makes for better memory reuse.
   swoc::bwprintv(tmp, fmt, std::forward_as_tuple(args...));
-  this->out(hdr_file, tmp, hdr_sol_p, hdr_indent);
+  this->out(hdr_file, tmp, _hdr_sol_p, _hdr_indent);
 }
 
 void
@@ -276,17 +295,17 @@ Context::out(std::ofstream &s, TextView text, bool &sol_p, int indent)
   while (text) {
     auto n    = text.size();
     auto line = text.split_prefix_at('\n');
-    if (line.empty() && n > text.size()) {
+    if (line.empty() && n > text.size()) { // empty line, don't write useless indentation.
       s << std::endl;
       sol_p = true;
-    } else { // non-empty line
+    } else { // non-empty line -> one of @a line or @a text has content.
       if (sol_p) {
         for (int i = indent; i > 0; --i) {
           s << "  ";
         }
         sol_p = false;
       }
-      if (!line.empty()) {
+      if (!line.empty()) { // entire line, ship it and reset the indentation flag.
         s << line << std::endl;
         sol_p = true;
       } else if (!text.empty()) { // no terminal newline, ship it without a
@@ -502,7 +521,8 @@ Context::process_one_of_value(YAML::Node const &node, std::string_view const &va
 }
 
 Errata
-Context::process_enum_value(YAML::Node const &node, std::string_view const &var) {
+Context::process_enum_value(YAML::Node const &node, std::string_view const &var)
+{
   if (!node.IsSequence()) {
     return notes.error("'{}' value at line {} is invalid - it must be {} type.", node.Mark().line,
                        SchemaTypeLexicon[SchemaType::ARRAY]);
@@ -510,15 +530,18 @@ Context::process_enum_value(YAML::Node const &node, std::string_view const &var)
     notes.warn("'{}' value at line {} has no items - ignored.", PropName[Property::ENUM], node.Mark().line);
   } else {
     std::string usage;
-    static const std::string separator { ", " };
+    static const std::string separator{", "};
     src_out("bool enum_match_p = false;\nfor ( auto && vn : {{ ");
-    for ( auto && n : node ) {
+    // Because the enum can be any type, the only reliable approach is to serialized the enum values
+    // and reconstitute them in the validator. Need to check if the initializer list reloads every
+    // invocation or not - may need to move these to a static list for that reason.
+    for (auto &&n : node) {
       YAML::Emitter e;
       e << n;
       src_out("YAML::Load(R\"uthira({})uthira\"), ", e.c_str());
       usage += e.c_str() + separator;
     }
-    usage.resize(usage.size()-2);
+    usage.resize(usage.size() - 2);
     src_out(" }} ) {{\n");
     indent_src();
     src_out("if ( equal(vn, {}) ) {{\n", var);
@@ -530,8 +553,10 @@ Context::process_enum_value(YAML::Node const &node, std::string_view const &var)
     src_out("}}\n");
     src_out("if (!enum_match_p) {{\n");
     indent_src();
-    src_out("YAML::Emitter yem;\nyem << {};\nerratum.error(\"'{{}}' value '{{}}' at line {{}} is invalid - it must be one of {{}}.\""
-            ", name, yem.c_str(), {}.Mark().line, R\"uthira({})uthira\");\nreturn false;\n", var, var, usage);
+    src_out(
+      "YAML::Emitter yem;\nyem << {};\nerratum.error(\"'{{}}' value '{{}}' at line {{}} is invalid - it must be one of {{}}.\""
+      ", name, yem.c_str(), {}.Mark().line, R\"uthira({})uthira\");\nreturn false;\n",
+      var, var, usage);
     exdent_src();
     src_out("}}\n");
   }
@@ -547,6 +572,9 @@ Context::process_array_value(YAML::Node const &node, std::string_view const &var
   bool has_tags_p =
     std::any_of(ArrayPropNames.begin(), ArrayPropNames.end(), [&](std::string_view const &name) -> bool { return node[name]; });
 
+  // If this value can only be a single type, then all the type checking needed has already been done
+  // so don't double up on the same check. Otherwise it may not be an array and the array properties
+  // should not be applied.
   if (!single_type_p && has_tags_p) {
     src_out("if ({}({})) {{\n", SchemaTypeCheck[SchemaType::ARRAY], var);
     indent_src();
@@ -633,10 +661,11 @@ Context::process_array_value(YAML::Node const &node, std::string_view const &var
 }
 
 Errata
-Context::process_object_value(YAML::Node const &node, std::string_view const &var, TypeSet const &types) {
+Context::process_object_value(YAML::Node const &node, std::string_view const &var, TypeSet const &types)
+{
   bool single_type_p = types.count() == 1;
-  bool has_tags_p = std::any_of(ObjectPropNames.begin(), ObjectPropNames.end(),
-                                [&](std::string_view const &name) -> bool { return node[name]; });
+  bool has_tags_p =
+    std::any_of(ObjectPropNames.begin(), ObjectPropNames.end(), [&](std::string_view const &name) -> bool { return node[name]; });
   if (!single_type_p && has_tags_p) {
     src_out("if ({}({})) {{\n", var, SchemaTypeCheck[SchemaType::OBJECT]);
     indent_src();
@@ -701,7 +730,6 @@ Context::validate_node(YAML::Node const &node, std::string_view const &var)
       types.set();
     }
 
-
     if (types[int(SchemaType::OBJECT)]) { // could be an object.
       if (process_object_value(node, var, types).severity() >= Severity::ERROR) {
         return notes;
@@ -747,7 +775,8 @@ Context::generate_define(YAML::Node const &key, YAML::Node const &value)
   definitions[DEFINITION_PREFIX + key.Scalar()] = defun;
   hdr_out("bool {} (swoc::Errata &erratum, YAML::Node const& node, std::string_view const& name);\n", defun);
 
-  src_out("bool {}::Definitions::{} (swoc::Errata &erratum, YAML::Node const& node, std::string_view const& name) {{\n", class_name, defun);
+  src_out("bool {}::Definitions::{} (swoc::Errata &erratum, YAML::Node const& node, std::string_view const& name) {{\n", class_name,
+          defun);
   indent_src();
   validate_node(value, "node");
   src_out("return true;\n");
@@ -812,9 +841,9 @@ process(int argc, char *argv[])
   }
 
   if (ctx.hdr_path.empty()) {
-    if (! ctx.src_path.empty()) {
+    if (!ctx.src_path.empty()) {
       swoc::bwprint(ctx.hdr_path, "{}.h", TextView{ctx.src_path}.remove_suffix_at('.'));
-    } else if (! ctx.class_name.empty()) {
+    } else if (!ctx.class_name.empty()) {
       swoc::bwprint(ctx.hdr_path, "{}.h", ctx.class_name);
     } else {
       return ctx.notes.error("Unable to determine path for output header file.");
@@ -822,9 +851,9 @@ process(int argc, char *argv[])
   }
 
   if (ctx.src_path.empty()) {
-    if (! ctx.hdr_path.empty()) {
+    if (!ctx.hdr_path.empty()) {
       swoc::bwprint(ctx.src_path, "{}.cc", TextView{ctx.hdr_path}.remove_suffix_at('.'));
-    } else if (! ctx.class_name.empty()) {
+    } else if (!ctx.class_name.empty()) {
       swoc::bwprint(ctx.src_path, "{}.cc", ctx.class_name);
     } else {
       return ctx.notes.error("Unable to determine path for output source file.");
@@ -869,6 +898,7 @@ process(int argc, char *argv[])
   ctx.hdr_out("swoc::Errata erratum;\n");
   ctx.hdr_out("bool operator()(const YAML::Node &n);\n\n", ctx.class_name);
 
+  // These are hand rolled functions that for the base of the generated code.
   ctx.src_file << (R"racecar(
 namespace {
 
