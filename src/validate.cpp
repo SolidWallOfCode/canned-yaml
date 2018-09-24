@@ -1,7 +1,7 @@
 #include <iostream>
 #include <string>
 
-#include "IpAllowSchema.h"
+#include "TLSConfigSchema.h"
 
 using namespace std;
 
@@ -9,7 +9,7 @@ int main()
 {
   YAML::Node config = YAML::LoadFile("./config.json");
   try {
-    IpAllowSchema schema;
+    TLSConfigSchema schema;
     bool valid_p = schema(config);
     std::cout << (valid_p ? "Nice job!" : "It's Leif's fault") << std::endl;
     if (!valid_p) {

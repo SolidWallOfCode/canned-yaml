@@ -364,14 +364,14 @@ Context::emit_type_check(TypeSet const &types, std::string_view const &var)
     src_out("(");
     for (auto &&[value, func] : SchemaTypeCheck) {
       if (types[int(value)]) {
-        src_out("{}{}.{}()", delimiter, var, func);
+        src_out("{}{}({})", delimiter, func, var);
         delimiter.assign(" || ");
       }
     }
 
     src_out(")) {{\n");
     indent_src();
-    src_out("return erratum.error(\"value at line {{}} was not one of the "
+    src_out("erratum.error(\"value at line {{}} was not one of the "
             "required types ");
     delimiter.clear();
     for (auto [value, name] : SchemaTypeLexicon) {
@@ -380,6 +380,7 @@ Context::emit_type_check(TypeSet const &types, std::string_view const &var)
         delimiter.assign(", ");
       }
     }
+    src_out("\");\nreturn false;\n");
     exdent_src();
     src_out("}}\n");
   }
@@ -547,7 +548,7 @@ Context::process_array_value(YAML::Node const &node, std::string_view const &var
     std::any_of(ArrayPropNames.begin(), ArrayPropNames.end(), [&](std::string_view const &name) -> bool { return node[name]; });
 
   if (!single_type_p && has_tags_p) {
-    src_out("if ({}.{}()) {{\n", var, SchemaTypeCheck[SchemaType::ARRAY]);
+    src_out("if ({}({})) {{\n", SchemaTypeCheck[SchemaType::ARRAY], var);
     indent_src();
   }
 
@@ -637,7 +638,7 @@ Context::process_object_value(YAML::Node const &node, std::string_view const &va
   bool has_tags_p = std::any_of(ObjectPropNames.begin(), ObjectPropNames.end(),
                                 [&](std::string_view const &name) -> bool { return node[name]; });
   if (!single_type_p && has_tags_p) {
-    src_out("if ({}.{}()) {{\n", var, SchemaTypeCheck[SchemaType::OBJECT]);
+    src_out("if ({}({})) {{\n", var, SchemaTypeCheck[SchemaType::OBJECT]);
     indent_src();
   }
   if (node[PropName[Property::REQUIRED]]) {
@@ -780,6 +781,8 @@ process(int argc, char *argv[])
   Context ctx;
   std::string tmp;
 
+  ctx.class_name = "Schema";
+
   while (-1 != (zret = getopt_long(argc, argv, ":", Options.data(), &idx))) {
     switch (zret) {
     case ':':
@@ -806,6 +809,26 @@ process(int argc, char *argv[])
 
   if (optind >= argc) {
     return ctx.notes.error("An input schema file is required");
+  }
+
+  if (ctx.hdr_path.empty()) {
+    if (! ctx.src_path.empty()) {
+      swoc::bwprint(ctx.hdr_path, "{}.h", TextView{ctx.src_path}.remove_suffix_at('.'));
+    } else if (! ctx.class_name.empty()) {
+      swoc::bwprint(ctx.hdr_path, "{}.h", ctx.class_name);
+    } else {
+      return ctx.notes.error("Unable to determine path for output header file.");
+    }
+  }
+
+  if (ctx.src_path.empty()) {
+    if (! ctx.hdr_path.empty()) {
+      swoc::bwprint(ctx.src_path, "{}.cc", TextView{ctx.hdr_path}.remove_suffix_at('.'));
+    } else if (! ctx.class_name.empty()) {
+      swoc::bwprint(ctx.src_path, "{}.cc", ctx.class_name);
+    } else {
+      return ctx.notes.error("Unable to determine path for output source file.");
+    }
   }
 
   swoc::file::path schema_path{argv[optind]};

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://github.com/apache/trafficserver/tree/master/configs/tls-config.schema.json",
+  "title": "Traffic Server TLS connection configuration",
+  "description": "TCL Connection configuration. Licensed under Apache V2 https://www.apache.org/licenses/LICENSE-2.0",
+  "type": "array",
+  "items": {
+    "description": "Connection handling.",
+    "type": "object",
+    "properties": {
+      "fqdn": {
+        "description": "Fully qualified domain name, matched by the SNI hostname.",
+        "type": "string"
+      },
+      "disable_h2": {
+        "description": "Disable HTTP/2 on this connection.",
+        "type": "boolean"
+      },
+      "verify_origin_server": {
+        "description": "Level of verification for the upstream destination.",
+        "type": "string",
+        "enum": [
+          "NONE",
+          "MODERATE",
+          "STRICT"
+        ]
+      },
+      "client_cert": {
+        "description": "Certificate to use as a client to the upstream.",
+        "type": "string"
+      },
+      "verify_client": {
+        "description": "level of verification for the certificate provided by the inbound connection.",
+        "type": "string",
+        "enum": [
+          "NONE",
+          "MODERATE",
+          "STRICT"
+        ]
+      },
+      "tunnel_route": {
+        "description": "Do not TLS terminate this connection. Tunnel it to this upstream.",
+        "type": "string"
+      },
+      "ip_allow": {
+        "description": "Set of remote IP addresses allowed to connect.",
+        "type": [ "string", "array" ],
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
