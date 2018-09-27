@@ -1001,4 +1001,5 @@ main(int argc, char *argv[])
   for (auto &&note : result) {
     std::cout << note.text() << std::endl;
   }
+  return result.severity() >= Severity::ERROR;
 }
