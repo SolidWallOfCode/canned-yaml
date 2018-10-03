@@ -43,12 +43,14 @@ using swoc::TextView;
 
 namespace
 {
+// The location of local definitions.
+constexpr std::string_view DEFINITIONS_TAG { "definitions" };
+// URI prefix for access to the "definitions" section.
+const std::string DEFINITION_PREFIX{"#/definitions/"};
+
 // Command line options.
 std::array<option, 4> Options = {
   {{"hdr", 1, nullptr, 'h'}, {"src", 1, nullptr, 's'}, {"class", 1, nullptr, 'c'}, {nullptr, 0, nullptr, 0}}};
-
-// URI prefix for access to the "definitions" section.
-static const std::string DEFINITION_PREFIX{"#/definitions/"};
 
 /// JSON Schema types.
 enum class SchemaType { NIL, BOOL, OBJECT, ARRAY, NUMBER, INTEGER, STRING, INVALID };
@@ -57,7 +59,7 @@ using TypeSet = std::bitset<static_cast<size_t>(SchemaType::INVALID)>;
 
 // Error message support - in many cases the list of valid types is needed for an error message,
 // so generate it once and store it here.
-std::string Valid_Type_List;
+std::string Valid_Type_Name_List;
 
 // Conversion between schema types and string representations. These are the strings that would be
 // in the schema file.
@@ -73,7 +75,7 @@ swoc::Lexicon<SchemaType> SchemaTypeLexicon{{
 
 // Type check functions. These are hand written and injected en masses in to the generated file.
 // This is used to map from a schema type (above) to the appropriate type check function.
-std::map<SchemaType, std::string> SchemaTypeCheck{{
+std::map<SchemaType, std::string_view> SchemaTypeCheck{{
   {SchemaType::NIL, "is_null_type"},
   {SchemaType::BOOL, "is_bool_type"},
   {SchemaType::OBJECT, "is_object_type"},
@@ -127,7 +129,7 @@ std::array<std::string_view, 3> ArrayPropNames  = {
       w.print("'{}', ", name);
     }
     w.discard(2);
-    Valid_Type_List.assign(w.view());
+    Valid_Type_Name_List.assign(w.view());
   }(),
   true);
 
@@ -189,16 +191,21 @@ bwformat(BufferWriter &w, const bwf::Spec &spec, const file::path &path)
 /** Parent node description.
  *  This is overall simpler than passing the actual parent node. In the base case there is no
  *  root node, and in many cases there is no good text description of the parent available from
- *  the node itself.
+ *  the node itself. This is used only for error messages.
  */
  struct NodeSource {
    std::string_view _name;
    int _line {-1};
 
+   /// Construct from a node that's a name (e.g. a key in a Map)
+   NodeSource(YAML::Node const& node);
+   /// Construct from an artificial name and node.
+   /// Useful for nodes from sequences primarily.
    NodeSource(std::string_view const& name, YAML::Node const& node);
  };
 
-NodeSource::NodeSource(std::string_view const& name, YAML::Node const& node) : name(name), _line(node.Mark().line) { }
+NodeSource::NodeSource(YAML::Node const& node) : _name(node.Scalar()), _line(node.Mark().line) { }
+NodeSource::NodeSource(std::string_view const& name, YAML::Node const& node) : _name(name), _line(node.Mark().line) { }
 
 /// Context carried between the various parsing steps.
 /// This maintains the parsing state as the schema is generated.
@@ -228,15 +235,15 @@ struct Context {
 
   // Working methods.
   /// Process the top level "definitions" value.
-  Errata process_definitions(NodeSource const& parent, YAML::Node const &value);
+  Errata process_definitions(YAML::Node const &value, NodeSource const& source);
   /// Generate the validation functions for the "definitions".
-  Errata generate_define(YAML::Node const &key, YAML::Node const &value);
+  Errata generate_define(YAML::Node const &key, YAML::Node const &value, NodeSource const& source);
   /// Generate validation logic for a specific node.
-  Errata validate_node(YAML::Node const &node, std::string_view const &var);
+  Errata validate_node(YAML::Node const& node, std::string_view const &var, NodeSource const& source);
 
   /// Process properties. Each function process the value for a specific property and is responsible
   /// for generating the appropriate code or dispatching the appropriate "emit_..." functions.
-  Errata process_type_value(const YAML::Node &node, TypeSet &types);
+  Errata process_type_value(const YAML::Node &value, TypeSet &types, NodeSource const& source);
   Errata process_object_value(YAML::Node const &node, std::string_view const &var, TypeSet const &types);
   Errata process_array_value(YAML::Node const &node, std::string_view const &var, TypeSet const &types);
   Errata process_any_of_value(YAML::Node const &node, std::string_view const &var);
@@ -421,30 +428,31 @@ Context::emit_type_check(TypeSet const &types, std::string_view const &var)
 
 // Process a 'type' node.
 Errata
-Context::process_type_value(const YAML::Node &node, TypeSet &types)
+Context::process_type_value(const YAML::Node &value, TypeSet &types, NodeSource const& source)
 {
+  Errata zret;
   auto check = [&](YAML::Node const &node) {
     auto &name     = node.Scalar();
     auto primitive = SchemaTypeLexicon[name];
     if (SchemaType::INVALID == primitive) {
-      notes.error("Type '{}' at line {} is not a valid type. It must be one of {}.", name, node.Mark().line, Valid_Type_List);
+      zret.error("Type '{}' for '{}' at line {} is not a valid type. It must be one of {}.", name, source._name, node.Mark().line, Valid_Type_Name_List);
     } else if (types[int(primitive)]) {
-      notes.warn("Type '{}' in 'type' value at line {} is duplicated.", name, node.Mark().line);
+      zret.warn("Type '{}' in 'type' value in '{}' at line {} is duplicated.", name, source._name, node.Mark().line);
     } else {
       types[int(primitive)] = true;
     }
   };
 
-  if (node.IsScalar()) {
-    check(node);
-  } else if (node.IsSequence()) {
-    for (auto &&n : node) {
+  if (value.IsScalar()) {
+    check(value);
+  } else if (value.IsSequence()) {
+    for (auto &&n : value) {
       check(n);
     }
   } else {
-    return notes.error("'type' value at line {} is neither a string nor a sequence of strings", node.Mark().line);
+    zret.error("'type' value in '{}' at line {} is neither a string nor a sequence of strings", source._name, value.Mark().line);
   }
-  return notes;
+  return zret;
 }
 
 Errata
@@ -465,7 +473,7 @@ Context::process_any_of_value(YAML::Node const &node, std::string_view const &va
     for (auto &&schema : node) {
       src_out("[&erratum = any_of_err, name, this] (YAML::Node const& node) -> bool {{\n");
       indent_src();
-      validate_node(schema, "node");
+      validate_node(schema, "node", NodeSource{PropName[Property::ANY_OF], node});
       src_out("return true;\n");
       exdent_src();
       src_out("}},\n");
@@ -503,7 +511,7 @@ Context::process_one_of_value(YAML::Node const &node, std::string_view const &va
     for (auto &&schema : node) {
       src_out("[&erratum = one_of_err, name, this] (YAML::Node const& node) -> bool {{\n");
       indent_src();
-      validate_node(schema, "node");
+      validate_node(schema, "node", NodeSource{PropName[Property::ONE_OF], node});
       src_out("return true;\n");
       exdent_src();
       src_out("}},\n");
@@ -622,13 +630,12 @@ Context::process_array_value(YAML::Node const &node, std::string_view const &var
     emit_max_items_check(var, x);
   }
 
-  if (node[PropName[Property::ITEMS]]) {
-    auto n_1 = node[PropName[Property::ITEMS]];
+  if (auto n_1 { node[PropName[Property::ITEMS]]} ; n_1) {
     if (n_1.IsMap()) {
       auto nvar = var_name();
       src_out("for ( auto && {} : {} ) {{\n", nvar, var);
       indent_src();
-      validate_node(n_1, nvar);
+      validate_node(n_1, nvar, { PropName[Property::ITEMS], n_1 } );
       exdent_src();
       src_out("}}\n");
     } else if (n_1.IsSequence()) {
@@ -643,17 +650,21 @@ Context::process_array_value(YAML::Node const &node, std::string_view const &var
       }
       if (limit <= min_items) {
         for (int idx = 0; idx < n_1.size(); ++idx) {
+          swoc::LocalBufferWriter<64> w;
           src_out("{} = {}[{}];\n", nvar, var, idx);
-          this->validate_node(n_1[idx], nvar);
+          w.print("[{}]", idx);
+          this->validate_node(n_1[idx], nvar, { w.view(), n_1 } );
         }
       } else {
         src_out("switch ({}.size()) {{\n", var);
         indent_src();
         for (int idx = 0; idx < n_1.size(); ++idx) {
+          swoc::LocalBufferWriter<64> w;
           src_out("case {}: {{\n");
           indent_src();
           src_out("auto {} = {}[{}];\n", nvar, var, idx);
-          this->validate_node(n_1[idx], nvar);
+          w.print("[{}]", idx);
+          this->validate_node(n_1[idx], nvar, { w.view(), n_1 });
           src_out("}}\n");
           exdent_src();
         }
@@ -703,7 +714,7 @@ Context::process_object_value(YAML::Node const &node, std::string_view const &va
       src_out("if ({}[\"{}\"]) {{\n", var, pair.first.Scalar());
       indent_src();
       src_out("auto {} = {}[\"{}\"];\n", nvar, var, pair.first.Scalar());
-      this->validate_node(pair.second, nvar);
+      this->validate_node(pair.second, nvar, { pair.first.Scalar(), n_1 } );
       exdent_src();
       src_out("}}\n");
     }
@@ -716,76 +727,74 @@ Context::process_object_value(YAML::Node const &node, std::string_view const &va
 }
 
 Errata
-Context::validate_node(YAML::Node const& parent, YAML::Node const &value, std::string_view const &var)
+Context::validate_node(YAML::Node const &value, std::string_view const &var, NodeSource const& source)
 {
   Errata zret;
   if (!value.IsMap()) {
-    return notes.error("Value at line {} must be a {}.", node.Mark().line,
+    return zret.error("Value for '{}' at line {} must be a {}.", source._name, value.Mark().line,
                 SchemaTypeLexicon[SchemaType::OBJECT]);
   }
-    if (node["$ref"]) {
-      auto n{node["$ref"]};
-      if (node.size() > 1) {
-        zret.warn("Ignoring tags in value for {} at line {} - use of '$ref' tag at "
-                   "line {} requires ignoring all other tags.",
-                   node.Mark().line, n.Mark().line);
-      }
-      if (auto spot = definitions.find(n.Scalar()); spot != definitions.end()) {
-        src_out("if (! defun.{}(erratum, {}, name)) return false;\n", spot->second, var);
-      } else {
-        zret.error("Invalid '$ref' at line {} in value at line {} - '{}' not found.", n.Mark().line, node.Mark().line, n.Scalar());
-      }
+
+  if (auto n{value["$ref"]}; n) {
+    if (value.size() > 1) {
+      zret.warn("Ignoring tags in value for {} at line {} - use of '$ref' tag at "
+                 "line {} requires ignoring all other tags.",
+                 source._name, value.Mark().line, n.Mark().line);
+    }
+    if (auto spot = definitions.find(n.Scalar()); spot != definitions.end()) {
+      src_out("if (! defun.{}(erratum, {}, name)) return false;\n", spot->second, var);
+    } else {
+      zret.error("Invalid '$ref' at line {} in value at line {} - '{}' not found.", n.Mark().line, value.Mark().line, n.Scalar());
+    }
+    return zret;
+  }
+
+  TypeSet types;
+  if (auto n{value["type"]}; n) {
+    zret.note(process_type_value(n, types, NodeSource("type", value)));
+    if (zret.severity() >= Severity::ERROR) {
+      return zret.note(zret.severity(), "Unable to process 'type' value for '{}' at line {}", source._name, source._line);
+    }
+    emit_type_check(types, var);
+  } else {
+    types.set();
+  }
+
+  if (types[int(SchemaType::OBJECT)]) { // could be an object.
+    if (zret.note(process_object_value(value, var, types)).severity() >= Severity::ERROR) {
+      return zret.note(zret.severity(), "Unable to process 'type' value for '{}' at line {}", source._name, source._line);
+    }
+  }
+
+  if (types[int(SchemaType::ARRAY)]) { // could be an array
+    if (zret.note(process_array_value(value, var, types)).severity() >= Severity::ERROR) {
+      return zret.note(zret.severity(), "Unable to process 'type' value for '{}' at line {}", source._name, source._line);
+    }
+  }
+
+  if (auto n{value[PropName[Property::ANY_OF]]}; n) {
+    if (zret.note(process_any_of_value(n, var)).severity() >= Severity::ERROR) {
       return zret;
     }
-
-    TypeSet types;
-    if (node["type"]) {
-      zret = process_type_value(node["type"], types);
-      if (notes.severity() >= Severity::ERROR) {
-        return zret;
-      }
-      emit_type_check(types, var);
-    } else {
-      types.set();
-    }
-
-    if (types[int(SchemaType::OBJECT)]) { // could be an object.
-      if (process_object_value(node, var, types).severity() >= Severity::ERROR) {
-        return notes;
-      }
-    }
-
-    if (types[int(SchemaType::ARRAY)]) { // could be an array
-      if (process_array_value(node, var, types).severity() >= Severity::ERROR) {
-        return notes;
-      }
-    }
-
-    if (node[PropName[Property::ANY_OF]]) {
-      if (process_any_of_value(node[PropName[Property::ANY_OF]], var).severity() >= Severity::ERROR) {
-        return notes;
-      }
-    }
-
-    if (node[PropName[Property::ONE_OF]]) {
-      if (process_one_of_value(node[PropName[Property::ONE_OF]], var).severity() >= Severity::ERROR) {
-        return notes;
-      }
-    }
-
-    if (node[PropName[Property::ENUM]]) {
-      if (process_enum_value(node[PropName[Property::ENUM]], var).severity() >= Severity::ERROR) {
-        return notes;
-      }
-    }
-
-  } else {
   }
-  return notes;
+
+  if (auto n{value[PropName[Property::ONE_OF]]}; n) {
+    if (zret.note(process_one_of_value(n, var)).severity() >= Severity::ERROR) {
+      return zret;
+    }
+  }
+
+  if (auto n{value[PropName[Property::ENUM]]}; n) {
+    if (zret.note(process_enum_value(n, var)).severity() >= Severity::ERROR) {
+      return zret;
+    }
+  }
+
+  return zret;
 }
 
 Errata
-Context::generate_define(YAML::Node const &key, YAML::Node const &value)
+Context::generate_define(YAML::Node const &key, YAML::Node const &value, NodeSource const& source)
 {
   Errata zret;
   std::string defun = "v_"; // prefix to avoid reserved word issues.
@@ -797,7 +806,7 @@ Context::generate_define(YAML::Node const &key, YAML::Node const &value)
   src_out("bool {}::Definitions::{} (swoc::Errata &erratum, YAML::Node const& node, std::string_view const& name) {{\n", class_name,
           defun);
   indent_src();
-  zret = validate_node(value, "node");
+  zret = validate_node(value, "node", { key.Scalar(), value } );
   if (zret.count() > 0) {
     zret.note(zret.severity(), "Generating definition '{}' from line {}", key.Scalar(), key.Mark().line);
   }
@@ -808,20 +817,20 @@ Context::generate_define(YAML::Node const &key, YAML::Node const &value)
 }
 
 Errata
-Context::process_definitions(NodeSource const& parent, YAML::Node const &value)
+Context::process_definitions(YAML::Node const &value, NodeSource const& source)
 {
   Errata zret;
   if (!value.IsMap()) {
-    return zret.error("'{}' value at line {} must be {} but is not.", parent._name, value.Mark().line, SchemaTypeLexicon[SchemaType::OBJECT]);
+    return zret.error("'{}' value at line {} must be {} but is not.", source._name, value.Mark().line, SchemaTypeLexicon[SchemaType::OBJECT]);
   }
   hdr_out("struct Definitions {{\n");
   indent_hdr();
   for (auto &&pair : value) {
-    if (! zret.note(generate_define(pair.first, pair.second)).is_ok()) {
+    if (! zret.note(generate_define(pair.first, pair.second, { pair.first.Scalar(), value})).is_ok()) {
       break;
     }
   }
-  if (!zret.count() > 0) {
+  if (!zret.empty()) {
     zret.note(zret.severity(), "Processing definitions");
   }
   hdr_out("\n{}::Definitions & defun {{ *this }};\n", class_name);
@@ -926,7 +935,7 @@ process(int argc, char *argv[])
   ctx.hdr_out("swoc::Errata erratum;\n");
   ctx.hdr_out("bool operator()(const YAML::Node &n);\n\n", ctx.class_name);
 
-  // These are hand rolled functions that for the base of the generated code.
+  // These are hand rolled functions used by the generated code.
   ctx.src_file << (R"racecar(
 namespace {
 
@@ -1004,8 +1013,8 @@ bool is_string_type(YAML::Node const& node) {
 
 )racecar");
 
-  if (root["definitions"]) {
-    ctx.notes = ctx.process_definitions(root, root["definitions"]);
+  if (YAML::Node const& node(root[DEFINITIONS_TAG]) ; node) {
+    ctx.notes = ctx.process_definitions({DEFINITIONS_TAG, root}, node);
   }
   ctx.exdent_hdr();
   ctx.hdr_out("}};\n");
