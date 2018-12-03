@@ -279,7 +279,7 @@ void
 Context::src_out(std::string_view fmt, Args &&... args)
 {
   static std::string tmp; // static makes for better memory reuse.
-  swoc::bwprintv(tmp, fmt, std::forward_as_tuple(args...));
+  swoc::bwprint_v(tmp, fmt, std::forward_as_tuple(args...));
   this->out(src_file, tmp, _src_sol_p, _src_indent);
 }
 
@@ -288,7 +288,7 @@ void
 Context::hdr_out(std::string_view fmt, Args &&... args)
 {
   static std::string tmp; // static makes for better memory reuse.
-  swoc::bwprintv(tmp, fmt, std::forward_as_tuple(args...));
+  swoc::bwprint_v(tmp, fmt, std::forward_as_tuple(args...));
   this->out(hdr_file, tmp, _hdr_sol_p, _hdr_indent);
 }
 
