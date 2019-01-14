@@ -1,33 +1,56 @@
 cmake_minimum_required(VERSION 3.12)
-
-project(CannedYAML)
-
 set(CMAKE_CXX_STANDARD 17)
-include_directories(include)
+
+set(INSTALL_DIR ${CMAKE_HOME_DIRECTORY})
+if(NOT DEFINED CMAKE_PREFIX_PATH)
+    set(CMAKE_PREFIX_PATH ${INSTALL_DIR})
+endif()
 
 include(ExternalProject)
 set(EP_BASE extern)
 
-ExternalProject_Add(YAML_CPP
-        GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
-        GIT_TAG yaml-cpp-0.6.2
-        CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${CMAKE_HOME_DIRECTORY}
-)
+# All of the arguments to pass to external projects.
+set(_CMAKE_ARGS
+    CMAKE_INSTALL_PREFIX=${INSTALL_DIR}
+    CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}
+    YAML_CPP_BUILD_TESTS=off
+    YAML_CPP_BUILD_TOOLS=off
+    YAML_CPP_BUILD_CONTRIB=off
+    )
+list(TRANSFORM _CMAKE_ARGS PREPEND "-D")
 
-find_library(LIB_YAML "libyaml-cpp.a" PATHS "lib")
+set(_YAML_CPP_ARGS
+    YAML_CPP_BUILD_TESTS=off
+    YAML_CPP_BUILD_TOOLS=off
+    YAML_CPP_BUILD_CONTRIB=off
+    )
+list(TRANSFORM _YAML_CPPR_ARGS PREPEND "-D")
 
-ExternalProject_Add(LibSWOC
-        GIT_REPOSITORY https://github.com/solidwallofcode/libswoc.git
-        GIT_TAG master
-        CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${CMAKE_HOME_DIRECTORY}
-)
+ExternalProject_Add(lib-yaml-cpp
+    GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
+    GIT_TAG yaml-cpp-0.6.2
+    GIT_SHALLOW TRUE
+    INSTALL_DIR ${INSTALL_DIR}
+    CMAKE_ARGS "${_CMAKE_ARGS};${_YAML_CPP_ARGS}"
+    STEP_TARGETS install
+    )
 
-add_executable(canner
-    src/canner.cc
-)
-add_dependencies(canner LibSWOC YAML_CPP)
-target_link_libraries(canner ${CMAKE_HOME_DIRECTORY}/lib/libyaml-cpp.a ${CMAKE_HOME_DIRECTORY}/lib/libswoc++.a ${POSIX_THREAD_LIB})
+ExternalProject_Add(lib-swoc++
+    GIT_REPOSITORY https://github.com/solidwallofcode/libswoc.git
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR swoc++
+    INSTALL_DIR ${INSTALL_DIR}
+    CMAKE_ARGS "${_CMAKE_ARGS}"
+    STEP_TARGETS install
+    )
 
-add_custom_target(clang-format-src COMMAND ${CMAKE_HOME_DIRECTORY}/tools/clang-format.sh ${CMAKE_HOME_DIRECTORY}/src)
-add_custom_target(clang-format)
-add_dependencies(clang-format clang-format-src)
+ExternalProject_Add(canner
+    SOURCE_DIR ${CMAKE_HOME_DIRECTORY}/canner
+    INSTALL_DIR ${INSTALL_DIR}
+    CMAKE_ARGS "${_CMAKE_ARGS}"
+    DEPENDS lib-yaml-cpp-install lib-swoc++-install
+    STEP_TARGETS install
+    )
+
+add_custom_target(clang-format COMMAND ${CMAKE_HOME_DIRECTORY}/tools/clang-format.sh canner/src)
