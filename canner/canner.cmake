@@ -1,0 +1,1 @@
+set(CANNED_YAML_CANNER ${INSTALL_DIR}/bin/canner)
