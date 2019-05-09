@@ -40,13 +40,21 @@
 using swoc::Errata;
 using swoc::Severity;
 using swoc::TextView;
+using namespace swoc::literals;
+
+namespace std {
+template<> class tuple_size<YAML::const_iterator::value_type> : public std::integral_constant<size_t, 2> {};
+template<> class tuple_element<0, YAML::const_iterator::value_type> { public: using type = const YAML::Node; };
+template<> class tuple_element<1, YAML::const_iterator::value_type> { public: using type = const YAML::Node; };
+} // namespace std
+template < size_t IDX > YAML::Node const& get(YAML::const_iterator::value_type const& v);
+template <> YAML::Node const& get<0>(YAML::const_iterator::value_type  const& v) { return v.first; }
+template <> YAML::Node const& get<1>(YAML::const_iterator::value_type  const& v) { return v.second; }
 
 namespace
 {
-// The location of local definitions.
-constexpr std::string_view DEFINITIONS_TAG{"definitions"};
-// URI prefix for access to the "definitions" section.
-const std::string DEFINITION_PREFIX{"#/definitions/"};
+// Standard tags
+const std::string REF_KEY{"$ref"};
 
 // Command line options.
 std::array<option, 4> Options = {
@@ -192,6 +200,8 @@ bwformat(BufferWriter &w, const bwf::Spec &spec, const file::path &path)
 /// Context carried between the various parsing steps.
 /// This maintains the parsing state as the schema is generated.
 struct Context {
+  YAML::Node root_node;
+
   std::string hdr_path;   ///< Path to the generated header file.
   std::ofstream hdr_file; ///< File object for the generated header file.
   std::string src_path;   ///< Path to the generated source file.
@@ -207,6 +217,12 @@ struct Context {
   /// Generated variable name index. This enables generating unique names whenever a local node
   /// variable is required.
   int var_idx{1};
+
+  /// Map of local definition URIs. When a '$ref' is found, this table is consulted to find the
+  /// correct validation function to invoke.
+  using Definitions = std::unordered_map<std::string, std::string>;
+  Definitions definitions;
+
   /// Allocate a new variable name.
   std::string var_name();
 
@@ -215,7 +231,10 @@ struct Context {
   void indent_hdr(); ///< Increase the indent level of the generated header file.
   void exdent_hdr(); ///< Decrease the indent level of the generated header file.
 
+  YAML::Node locate(TextView path);
+
   // Working methods.
+  Errata process_definition(YAML::Node const& node);
   /// Process the top level "definitions" value.
   Errata process_definitions(YAML::Node const &value);
   /// Generate the validation functions for the "definitions".
@@ -246,11 +265,6 @@ struct Context {
   /// Internal output functions which does the real work. @c src_out and @c hdr_out are responsible
   /// for passing the appropriate arguments to this method to send the output to the right place.
   void out(std::ofstream &s, TextView text, bool &sol_p, int indent);
-
-  /// Map of local definition URIs. When a '$ref' is found, this table is consulted to find the
-  /// correct validation function to invoke.
-  using Definitions = std::unordered_map<std::string, std::string>;
-  Definitions definitions;
 };
 
 void
@@ -824,6 +838,48 @@ Context::generate_define(YAML::Node const &key, YAML::Node const &value)
   return zret;
 }
 
+YAML::Node Context::locate(TextView path) {
+  YAML::Node node { root_node };
+  while (path) {
+    auto elt { path.take_prefix_at('/') };
+    if (elt.empty() || elt == "#") {
+      node = root_node;
+      continue;
+    }
+    if (node.IsMap()) {
+      node = node[elt];
+      if (! node) {
+      }
+    } else {
+    }
+  };
+
+}
+
+Errata
+Context::process_definition(YAML::Node const& node) {
+  Errata erratum;
+  if (node.IsMap()) {
+    if (auto ref_node{node[REF_KEY]} ; ref_node) {
+      if (auto spot = definitions.find(ref_node.Scalar()) ; spot == definitions.end()) {
+
+        erratum.error(R"(Unable to find ref "{}" used at {}.)", ref_node.Scalar(), ref_node.Mark());
+      } // else it's already been processed.
+    } else {
+      for ( [[maybe_unused]] auto const& [ key, value ] : node ) {
+        erratum.note(this->process_definition(value));
+      }
+    }
+  } else if (node.IsSequence()) {
+    for ( auto const& n : node ) {
+      erratum.note(this->process_definition(n));
+    }
+  }
+  return erratum.
+}
+
+
+// Walk the schema and pull out the referenced definitions.
 Errata
 Context::process_definitions(YAML::Node const &value)
 {

@@ -37,7 +37,7 @@ ExternalProject_Add(lib-yaml-cpp
 
 ExternalProject_Add(lib-swoc++
     GIT_REPOSITORY https://github.com/solidwallofcode/libswoc.git
-    GIT_TAG master
+    GIT_TAG 1.0.5
     GIT_SHALLOW TRUE
     SOURCE_SUBDIR swoc++
     INSTALL_DIR ${INSTALL_DIR}
@@ -45,12 +45,9 @@ ExternalProject_Add(lib-swoc++
     STEP_TARGETS install
     )
 
-ExternalProject_Add(canner
-    SOURCE_DIR ${CMAKE_HOME_DIRECTORY}/canner
-    INSTALL_DIR ${INSTALL_DIR}
-    CMAKE_ARGS "${_CMAKE_ARGS}"
-    DEPENDS lib-yaml-cpp-install lib-swoc++-install
-    STEP_TARGETS install
-    )
-
 add_custom_target(clang-format COMMAND ${CMAKE_HOME_DIRECTORY}/tools/clang-format.sh canner/src)
+
+# If using CLion, pass "-DENABLE_IDE_HACKS=TRUE" as a CMake argument to make the editor behave as desired.
+if(${ENABLE_IDE_HACKS})
+    add_subdirectory(canner)
+endif()
