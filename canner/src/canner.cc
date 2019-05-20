@@ -40,6 +40,7 @@
 using swoc::Errata;
 using swoc::Severity;
 using swoc::TextView;
+using swoc::Rv;
 using namespace swoc::literals;
 
 namespace std {
@@ -195,6 +196,8 @@ bwformat(BufferWriter &w, const bwf::Spec &spec, const file::path &path)
 {
   return bwformat(w, spec, std::string_view{path.c_str()});
 }
+
+
 } // namespace swoc
 
 /// Context carried between the various parsing steps.
@@ -231,14 +234,10 @@ struct Context {
   void indent_hdr(); ///< Increase the indent level of the generated header file.
   void exdent_hdr(); ///< Decrease the indent level of the generated header file.
 
-  YAML::Node locate(TextView path);
+  Rv<YAML::Node> locate(TextView path);
 
   // Working methods.
-  Errata process_definition(YAML::Node const& node);
-  /// Process the top level "definitions" value.
-  Errata process_definitions(YAML::Node const &value);
-  /// Generate the validation functions for the "definitions".
-  Errata generate_define(YAML::Node const &key, YAML::Node const &value);
+  Errata process_definitions(YAML::Node const& node);
   /// Generate validation logic for a specific node.
   Errata validate_node(YAML::Node const &node, std::string_view const &var);
 
@@ -814,94 +813,84 @@ Context::validate_node(YAML::Node const &value, std::string_view const &var)
   return zret;
 }
 
-Errata
-Context::generate_define(YAML::Node const &key, YAML::Node const &value)
-{
-  Errata zret;
-  std::string defun;
-  swoc::bwprint(defun, "v_{}", key.Scalar()); // prefix to avoid reserved words.
-  // Force non-valid identifier characters to '_'
-  std::transform(defun.begin(), defun.end(), defun.begin(), [](char c) { return isalnum(c) ? c : '_'; });
-  definitions[DEFINITION_PREFIX + key.Scalar()] = defun;
-  hdr_out("bool {} (swoc::Errata &erratum, YAML::Node const& node, std::string_view const& name);\n", defun);
-
-  src_out("bool {}::Definitions::{} (swoc::Errata &erratum, YAML::Node const& node, std::string_view const& name) {{\n", class_name,
-          defun);
-  indent_src();
-  zret = validate_node(value, "node");
-  if (zret.count() > 0) {
-    zret.note(zret.severity(), "Failed to generate definition '{}' from line {}", key.Scalar(), key.Mark().line);
-  }
-  src_out("return true;\n");
-  exdent_src();
-  src_out("}}\n\n");
-  return zret;
-}
-
-YAML::Node Context::locate(TextView path) {
-  YAML::Node node { root_node };
-  while (path) {
-    auto elt { path.take_prefix_at('/') };
+Rv<YAML::Node> Context::locate(TextView path) {
+  Rv<YAML::Node> zret;
+  YAML::Node node { root_node }; // start here?
+  TextView location { path }; // save original path.
+  while (location) {
+    auto elt { location.take_prefix_at('/') };
     if (elt.empty() || elt == "#") {
       node = root_node;
       continue;
     }
     if (node.IsMap()) {
-      node = node[elt];
-      if (! node) {
+      if ( node[elt] ) {
+        node = node[elt];
+      } else {
+        zret.errata().error(R"("{}" is not in the map {} at {}.)", elt, path.prefix(path.size() - location.size()), node.Mark());
+        break;
       }
     } else {
+      zret.errata().error(R"("{}" is not a map.)", path.prefix(path.size() - location.size()));
+      break;
     }
   };
-
+  if (zret.is_ok()) {
+    zret = node;
+  }
+  return std::move(zret);
 }
 
 Errata
-Context::process_definition(YAML::Node const& node) {
+Context::process_definitions(YAML::Node const& node) {
   Errata erratum;
   if (node.IsMap()) {
     if (auto ref_node{node[REF_KEY]} ; ref_node) {
       if (auto spot = definitions.find(ref_node.Scalar()) ; spot == definitions.end()) {
+        auto def_rv { this->locate(ref_node.Scalar()) };
+        if (def_rv.is_ok()) {
+          TextView name { ref_node.Scalar() };
+          if (name.starts_with("#/")) {
+            name.remove_prefix(2);
+          }
+          std::string defun;
+          swoc::bwprint(defun, "v_{}", name);
+          std::transform(defun.begin(), defun.end(), defun.begin(), [](char c) { return isalnum(c) ? c : '_'; });
+          definitions[ref_node.Scalar()] = defun;
+          // Generate any dependent definitions.
+          this->process_definitions(def_rv);
+          // Generate this definition.
+          hdr_out("bool {} (swoc::Errata &erratum, YAML::Node const& node, std::string_view const& name);\n", defun);
 
-        erratum.error(R"(Unable to find ref "{}" used at {}.)", ref_node.Scalar(), ref_node.Mark());
+          src_out("bool {}::Definitions::{} (swoc::Errata &erratum, YAML::Node const& node, std::string_view const& name) {{\n", class_name,
+              defun);
+          indent_src();
+          erratum = validate_node(def_rv, "node");
+          src_out("return true;\n");
+          exdent_src();
+          src_out("}}\n\n");
+
+          if (!erratum.is_ok()) {
+            erratum.info(R"(Failed to generate definition "{}" at {}, used at {})", ref_node.Scalar(), def_rv.result(), ref_node.Mark());
+          }
+        } else {
+          erratum.note(def_rv);
+          erratum.error(R"(Unable to find ref "{}" used at {}.)", ref_node.Scalar(), ref_node.Mark());
+        }
       } // else it's already been processed.
     } else {
       for ( [[maybe_unused]] auto const& [ key, value ] : node ) {
-        erratum.note(this->process_definition(value));
+        erratum.note(this->process_definitions(value));
       }
     }
   } else if (node.IsSequence()) {
     for ( auto const& n : node ) {
-      erratum.note(this->process_definition(n));
+      erratum.note(this->process_definitions(n));
     }
   }
-  return erratum.
+  return erratum;
 }
 
-
-// Walk the schema and pull out the referenced definitions.
-Errata
-Context::process_definitions(YAML::Node const &value)
-{
-  Errata zret;
-  if (!value.IsMap()) {
-    return zret.error("Value at line {} must be {} but is not.", value.Mark().line, SchemaTypeLexicon[SchemaType::OBJECT]);
-  }
-  hdr_out("struct Definitions {{\n");
-  indent_hdr();
-  for (auto &&pair : value) {
-    if (!zret.note(generate_define(pair.first, pair.second)).is_ok()) {
-      break;
-    }
-  }
-  if (!zret.empty()) {
-    zret.note(zret.severity(), "Processing definitions");
-  }
-  hdr_out("\n{}::Definitions & defun {{ *this }};\n", class_name);
-  exdent_hdr();
-  hdr_out("}} defun;\n", class_name);
-  return zret;
-}
 
 Errata
 process(int argc, char *argv[])
@@ -1077,9 +1066,7 @@ bool is_string_type(YAML::Node const& node) {
 
 )racecar");
 
-  if (YAML::Node const &node(root[DEFINITIONS_TAG]); node) {
-    ctx.notes = ctx.process_definitions(node);
-  }
+  ctx.process_definitions(root);
   ctx.exdent_hdr();
   ctx.hdr_out("}};\n");
 
