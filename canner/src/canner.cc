@@ -48,9 +48,17 @@ template<> class tuple_size<YAML::const_iterator::value_type> : public std::inte
 template<> class tuple_element<0, YAML::const_iterator::value_type> { public: using type = const YAML::Node; };
 template<> class tuple_element<1, YAML::const_iterator::value_type> { public: using type = const YAML::Node; };
 } // namespace std
+
 template < size_t IDX > YAML::Node const& get(YAML::const_iterator::value_type const& v);
 template <> YAML::Node const& get<0>(YAML::const_iterator::value_type  const& v) { return v.first; }
 template <> YAML::Node const& get<1>(YAML::const_iterator::value_type  const& v) { return v.second; }
+
+namespace swoc {
+BufferWriter &
+bwformat(BufferWriter &w, bwf::Spec const &spec, YAML::Mark const &mark) {
+  return w.print("Line {}", mark.line);
+}
+} // namespace swoc
 
 namespace
 {
@@ -234,7 +242,14 @@ struct Context {
   void indent_hdr(); ///< Increase the indent level of the generated header file.
   void exdent_hdr(); ///< Decrease the indent level of the generated header file.
 
-  Rv<YAML::Node> locate(TextView path);
+
+  /** Find a node from a @a base node following the @a path.
+   *
+   * @param base The starting node for relative paths.
+   * @param path The path to the target node.
+   * @return The target node, or an error condition.
+   */
+  Rv<YAML::Node> locate(YAML::Node base, TextView path);
 
   // Working methods.
   Errata process_definitions(YAML::Node const& node);
@@ -813,19 +828,18 @@ Context::validate_node(YAML::Node const &value, std::string_view const &var)
   return zret;
 }
 
-Rv<YAML::Node> Context::locate(TextView path) {
+Rv<YAML::Node> Context::locate(YAML::Node node, TextView path) {
   Rv<YAML::Node> zret;
-  YAML::Node node { root_node }; // start here?
   TextView location { path }; // save original path.
   while (location) {
     auto elt { location.take_prefix_at('/') };
     if (elt.empty() || elt == "#") {
-      node = root_node;
+      node.reset(root_node);
       continue;
     }
     if (node.IsMap()) {
-      if ( node[elt] ) {
-        node = node[elt];
+      if (node[elt]) {
+        node.reset(node[elt]);
       } else {
         zret.errata().error(R"("{}" is not in the map {} at {}.)", elt, path.prefix(path.size() - location.size()), node.Mark());
         break;
@@ -847,7 +861,7 @@ Context::process_definitions(YAML::Node const& node) {
   if (node.IsMap()) {
     if (auto ref_node{node[REF_KEY]} ; ref_node) {
       if (auto spot = definitions.find(ref_node.Scalar()) ; spot == definitions.end()) {
-        auto def_rv { this->locate(ref_node.Scalar()) };
+        auto def_rv { this->locate(node, ref_node.Scalar()) };
         if (def_rv.is_ok()) {
           TextView name { ref_node.Scalar() };
           if (name.starts_with("#/")) {
@@ -858,17 +872,22 @@ Context::process_definitions(YAML::Node const& node) {
           std::transform(defun.begin(), defun.end(), defun.begin(), [](char c) { return isalnum(c) ? c : '_'; });
           definitions[ref_node.Scalar()] = defun;
           // Generate any dependent definitions.
-          this->process_definitions(def_rv);
-          // Generate this definition.
-          hdr_out("bool {} (swoc::Errata &erratum, YAML::Node const& node, std::string_view const& name);\n", defun);
+          erratum.note(this->process_definitions(def_rv));
+          if (erratum.is_ok()) {
+            // Generate this definition.
+            hdr_out(
+                "bool {} (swoc::Errata &erratum, YAML::Node const& node, std::string_view const& name);\n"
+                , defun);
 
-          src_out("bool {}::Definitions::{} (swoc::Errata &erratum, YAML::Node const& node, std::string_view const& name) {{\n", class_name,
-              defun);
-          indent_src();
-          erratum = validate_node(def_rv, "node");
-          src_out("return true;\n");
-          exdent_src();
-          src_out("}}\n\n");
+            src_out(
+                "bool {}::Definitions::{} (swoc::Errata &erratum, YAML::Node const& node, std::string_view const& name) {{\n"
+                , class_name, defun);
+            indent_src();
+            erratum.note(validate_node(def_rv, "node"));
+            src_out("return true;\n");
+            exdent_src();
+            src_out("}}\n\n");
+          }
 
           if (!erratum.is_ok()) {
             erratum.info(R"(Failed to generate definition "{}" at {}, used at {})", ref_node.Scalar(), def_rv.result(), ref_node.Mark());
@@ -962,6 +981,7 @@ process(int argc, char *argv[])
   } catch (std::exception &ex) {
     return ctx.notes.error("Loading failed: {}", ex.what());
   }
+  ctx.root_node.reset(root);
 
   ctx.hdr_file.open(ctx.hdr_path.c_str(), std::ofstream::trunc);
   if (!ctx.hdr_file.is_open()) {
@@ -1066,7 +1086,10 @@ bool is_string_type(YAML::Node const& node) {
 
 )racecar");
 
-  ctx.process_definitions(root);
+  if ( auto errata { ctx.process_definitions(root) } ; ! errata.is_ok() ) {
+    return errata;
+  }
+
   ctx.exdent_hdr();
   ctx.hdr_out("}};\n");
 
@@ -1089,5 +1112,6 @@ main(int argc, char *argv[])
   for (auto &&note : result) {
     std::cout << note.text() << std::endl;
   }
+  std::cerr << result;
   return result.severity() >= Severity::ERROR;
 }
